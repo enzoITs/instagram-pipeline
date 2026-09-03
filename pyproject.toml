@@ -1,0 +1,20 @@
+[project]
+name = "instagram-pipeline"
+version = "1.0.0"
+description = "Coleta automatizada e histórico de métricas de engajamento do Instagram via Meta Graph API"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.testclient",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/static/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

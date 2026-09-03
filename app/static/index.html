@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instagram Pipeline — Dashboard de Engajamento</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/favicon.svg" alt="" width="28" height="28">
+      <div>
+        <h1>Instagram Pipeline</h1>
+        <p class="brand-sub">Histórico de engajamento via Meta Graph API</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <label class="visually-hidden" for="account-select">Conta</label>
+      <select id="account-select" class="select" hidden></select>
+      <button id="btn-collect" class="btn btn-primary" hidden>Coletar agora</button>
+      <button id="btn-export" class="btn" hidden>Exportar CSV</button>
+      <a id="btn-connect" class="btn btn-primary" href="/auth/login" hidden>Conectar Instagram</a>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main id="main">
+    <!-- Estado inicial: nenhuma conta conectada -->
+    <section id="empty-state" class="empty" hidden>
+      <h2>Nenhuma conta conectada</h2>
+      <p>
+        Conecte uma conta Instagram <strong>Business</strong> ou <strong>Creator</strong>
+        para começar a coletar métricas. Contas pessoais não têm acesso à Insights API.
+      </p>
+      <div id="empty-actions">
+        <a class="btn btn-primary" href="/auth/login">Conectar conta do Instagram</a>
+      </div>
+      <p id="empty-config" class="hint" hidden></p>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="dashboard" hidden>
+      <div class="kpi-grid" id="kpi-grid"></div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Evolução do engajamento</h2>
+          <div class="panel-controls">
+            <select id="range-select" class="select">
+              <option value="7">Últimos 7 dias</option>
+              <option value="30" selected>Últimos 30 dias</option>
+              <option value="90">Últimos 90 dias</option>
+              <option value="365">Último ano</option>
+            </select>
+            <select id="metric-select" class="select">
+              <option value="engagement_rate">Taxa de engajamento (%)</option>
+              <option value="likes">Curtidas</option>
+              <option value="comments">Comentários</option>
+              <option value="saved">Salvamentos</option>
+              <option value="shares">Compartilhamentos</option>
+              <option value="reach">Alcance</option>
+              <option value="views">Visualizações</option>
+            </select>
+          </div>
+        </div>
+        <div class="chart-wrap"><canvas id="timeseries-chart"></canvas></div>
+        <p id="timeseries-empty" class="hint" hidden>
+          Ainda não há coletas suficientes para desenhar o gráfico. Cada execução da coleta
+          adiciona um ponto na linha do tempo.
+        </p>
+      </div>
+
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-head"><h2>Desempenho por formato</h2></div>
+          <div class="chart-wrap chart-wrap-sm"><canvas id="breakdown-chart"></canvas></div>
+          <p id="breakdown-empty" class="hint" hidden>Sem dados por formato ainda.</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Execuções recentes</h2></div>
+          <div class="table-scroll">
+            <table class="table table-compact">
+              <thead>
+                <tr><th>Início</th><th>Origem</th><th>Status</th><th class="num">Posts</th><th class="num">Chamadas</th></tr>
+              </thead>
+              <tbody id="runs-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Posts coletados</h2>
+          <div class="panel-controls">
+            <input id="search-input" class="input" type="search" placeholder="Buscar na legenda…">
+            <select id="type-select" class="select">
+              <option value="">Todos os formatos</option>
+              <option value="FEED">Feed</option>
+              <option value="REELS">Reels</option>
+              <option value="STORY">Stories</option>
+            </select>
+            <select id="sort-select" class="select">
+              <option value="timestamp:desc">Mais recentes</option>
+              <option value="timestamp:asc">Mais antigos</option>
+              <option value="engagement_rate:desc">Maior engajamento</option>
+              <option value="engagement_rate:asc">Menor engajamento</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Post</th>
+                <th>Formato</th>
+                <th>Publicado</th>
+                <th class="num">Curtidas</th>
+                <th class="num">Coment.</th>
+                <th class="num">Salv.</th>
+                <th class="num">Compart.</th>
+                <th class="num">Alcance</th>
+                <th class="num">Views</th>
+                <th class="num">Engaj.</th>
+              </tr>
+            </thead>
+            <tbody id="media-body"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="prev-page" class="btn btn-sm">Anterior</button>
+          <span id="page-info" class="hint"></span>
+          <button id="next-page" class="btn btn-sm">Próxima</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Detalhe de um post -->
+  <div id="media-dialog" class="dialog-backdrop" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <div class="dialog-head">
+        <h2 id="dialog-title">Histórico do post</h2>
+        <button id="dialog-close" class="btn btn-sm" aria-label="Fechar">Fechar</button>
+      </div>
+      <div id="dialog-body" class="dialog-body"></div>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <span id="footer-status">Carregando…</span>
+    <a href="/docs">Documentação da API</a>
+  </footer>
+</body>
+</html>

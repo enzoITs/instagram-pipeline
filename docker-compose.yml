@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Inside the container the app must listen on all interfaces.
+      HOST: 0.0.0.0
+      DATABASE_URL: sqlite:////app/data/instagram_pipeline.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
