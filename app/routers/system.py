@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterator
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from app.database import get_db
 from app.models import Account, Media, MetricSnapshot
 from app.routers.accounts import get_account
 from app.schemas import HealthOut
+from app.security import require_session, session_is_valid
 
 router = APIRouter(tags=["system"])
 
@@ -41,7 +43,13 @@ EXPORT_COLUMNS = [
 
 
 @router.get("/api/health", response_model=HealthOut, summary="Service health and config")
-def health(db: Session = Depends(get_db)) -> HealthOut:
+def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
+    """Liveness plus, for a signed-in caller, the configuration detail.
+
+    The endpoint stays reachable without a session so an uptime probe works,
+    but an anonymous caller only learns whether the service is up — not how it
+    is configured or how many accounts it holds.
+    """
     settings = get_settings()
     try:
         db.execute(select(1))
@@ -49,12 +57,21 @@ def health(db: Session = Depends(get_db)) -> HealthOut:
     except Exception as exc:  # pragma: no cover - only on a broken DB
         database = f"error: {exc}"
 
+    status_value = "ok" if database == "ok" else "degraded"
+    if not session_is_valid(request, settings):
+        return HealthOut(
+            status=status_value,
+            auth_required=True,
+            database="ok" if database == "ok" else "error",
+        )
+
     connected = db.scalar(
         select(func.count(Account.id)).where(Account.is_active.is_(True))
     ) or 0
 
     return HealthOut(
-        status="ok" if database == "ok" else "degraded",
+        status=status_value,
+        auth_required=settings.auth_enabled,
         environment=settings.environment,
         database=database,
         meta_configured=settings.is_configured,
@@ -70,6 +87,7 @@ def health(db: Session = Depends(get_db)) -> HealthOut:
     "/api/accounts/{account_id}/export.csv",
     summary="Download the full metric history as CSV",
     response_class=StreamingResponse,
+    dependencies=[Depends(require_session)],
 )
 def export_csv(
     account: Account = Depends(get_account),
@@ -81,30 +99,48 @@ def export_csv(
         .join(Media, Media.id == MetricSnapshot.media_id)
         .where(Media.account_id == account.id)
         .order_by(MetricSnapshot.collected_at.desc(), Media.id)
+        .execution_options(yield_per=500)
     )
-    rows = db.execute(stmt).all()
+    filename = f"instagram-metrics-{account.username or account.ig_user_id}.csv"
+    return StreamingResponse(
+        _csv_rows(db, stmt, latest_only=latest_only),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
-    if latest_only:
-        seen: set[int] = set()
-        filtered = []
-        for snapshot, media in rows:
+
+def _csv_rows(db: Session, stmt, *, latest_only: bool) -> Iterator[str]:  # noqa: ANN001
+    """Yield the export one chunk at a time.
+
+    Years of history can be far more rows than are comfortable to hold in
+    memory, so the query streams and each line is handed to the client as it is
+    produced instead of being assembled into a single string.
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+
+    def flush() -> str:
+        chunk = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        return chunk
+
+    writer.writerow(EXPORT_COLUMNS)
+    yield flush()
+
+    seen: set[int] = set()
+    for snapshot, media in db.execute(stmt):
+        if latest_only:
             if media.id in seen:
                 continue
             seen.add(media.id)
-            filtered.append((snapshot, media))
-        rows = filtered
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(EXPORT_COLUMNS)
-    for snapshot, media in rows:
         writer.writerow(
             [
                 _iso(snapshot.collected_at),
-                media.ig_media_id,
-                media.permalink or "",
-                media.media_type or "",
-                media.media_product_type or "",
+                _text(media.ig_media_id),
+                _text(media.permalink),
+                _text(media.media_type),
+                _text(media.media_product_type),
                 _iso(media.timestamp),
                 _num(snapshot.likes),
                 _num(snapshot.comments),
@@ -114,18 +150,11 @@ def export_csv(
                 _num(snapshot.views),
                 _num(snapshot.total_interactions),
                 _num(snapshot.engagement_rate),
-                snapshot.engagement_basis or "",
-                (media.caption or "").replace("\n", " ").strip()[:500],
+                _text(snapshot.engagement_basis),
+                _text((media.caption or "").replace("\n", " ").strip()[:500]),
             ]
         )
-
-    buffer.seek(0)
-    filename = f"instagram-metrics-{account.username or account.ig_user_id}.csv"
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+        yield flush()
 
 
 def _iso(value: datetime | None) -> str:
@@ -134,3 +163,18 @@ def _iso(value: datetime | None) -> str:
 
 def _num(value: int | float | None) -> str:
     return "" if value is None else str(value)
+
+
+# Characters a spreadsheet treats as the start of a formula. A caption is
+# attacker-controlled text, so prefixing it keeps the export from executing
+# anything when opened in Excel, LibreOffice or Sheets.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _text(value: str | None) -> str:
+    """Return a cell value that cannot be interpreted as a formula."""
+    if not value:
+        return ""
+    if value.startswith(_FORMULA_PREFIXES):
+        return f"\t{value}"
+    return value

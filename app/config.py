@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
+import stat
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = logging.getLogger(__name__)
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Where a generated development secret is persisted. Keeping it on disk is what
+# stops every restart from silently invalidating the stored access tokens.
+DEV_SECRET_FILE = BASE_DIR / "data" / ".secret_key"
 
 
 class Settings(BaseSettings):
@@ -37,8 +45,17 @@ class Settings(BaseSettings):
     # OAuth redirect URI in the Meta App dashboard.
     public_base_url: str = "http://localhost:8000"
 
-    # Secret used to sign the OAuth `state` parameter and session cookies.
-    secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
+    # Secret used to sign the OAuth `state` parameter and session cookies, and
+    # to derive the token encryption key when `token_encryption_key` is unset.
+    # Left empty it is NOT random: an empty value would silently derive a
+    # publicly known Fernet key, so the validator below either generates and
+    # persists one (development) or refuses to start (production).
+    secret_key: str = ""
+
+    # Password protecting the dashboard and the API. Empty disables the login
+    # entirely, which is only appropriate on a machine nobody else can reach.
+    admin_password: str = ""
+    session_max_age_hours: int = 12
 
     # Fernet key used to encrypt access tokens at rest. Generate with:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -90,8 +107,48 @@ class Settings(BaseSettings):
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
+    @field_validator("token_encryption_key")
+    @classmethod
+    def _validate_fernet_key(cls, value: str) -> str:
+        """Fail at startup, not at the first token write, on a malformed key."""
+        key = value.strip()
+        if not key:
+            return key
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(key.encode())
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "TOKEN_ENCRYPTION_KEY is not a valid Fernet key. Generate one with: "
+                'python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            ) from exc
+        return key
+
     @model_validator(mode="after")
-    def _ensure_sqlite_dir(self) -> "Settings":
+    def _ensure_secret_key(self) -> Settings:
+        """Guarantee a stable, non-guessable secret.
+
+        An absent variable used to fall back to a fresh random key on every
+        process start, which made every stored token unreadable after a
+        restart. An empty variable — what copying `.env.example` verbatim
+        produces — was worse: it derived the Fernet key from sha256("") , a
+        value anybody can compute from this source file.
+        """
+        if self.secret_key.strip():
+            return self
+        if self.environment == "production":
+            raise ValueError(
+                "SECRET_KEY is empty and ENVIRONMENT=production. Generate one with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(48))\" "
+                "and put it in the .env file."
+            )
+        self.secret_key = _load_or_create_dev_secret()
+        return self
+
+    @model_validator(mode="after")
+    def _ensure_sqlite_dir(self) -> Settings:
         if self.database_url.startswith("sqlite:///"):
             db_path = Path(self.database_url.removeprefix("sqlite:///"))
             db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +175,42 @@ class Settings(BaseSettings):
         if self.meta_login_flow == "facebook_login":
             return self.facebook_scopes
         return self.instagram_scopes
+
+
+    @property
+    def auth_enabled(self) -> bool:
+        """True when the dashboard and API require a session cookie."""
+        return bool(self.admin_password)
+
+
+def _load_or_create_dev_secret() -> str:
+    """Read the persisted development secret, creating it on first use."""
+    try:
+        existing = DEV_SECRET_FILE.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+
+    generated = secrets.token_urlsafe(48)
+    try:
+        DEV_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DEV_SECRET_FILE.write_text(generated, encoding="utf-8")
+        DEV_SECRET_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        logger.warning(
+            "SECRET_KEY was not set; generated one and stored it at %s. "
+            "Set SECRET_KEY in the .env file before deploying.",
+            DEV_SECRET_FILE,
+        )
+    except OSError as exc:  # pragma: no cover - read-only filesystem
+        logger.error(
+            "SECRET_KEY is unset and %s could not be written (%s). Falling back "
+            "to a per-process key: stored access tokens will not survive a "
+            "restart. Set SECRET_KEY explicitly.",
+            DEV_SECRET_FILE,
+            exc,
+        )
+    return generated
 
 
 @lru_cache(maxsize=1)

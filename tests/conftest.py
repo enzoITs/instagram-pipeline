@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
 from app.crypto import encrypt_token  # noqa: E402
-from app.database import Base, SessionLocal, engine, init_db  # noqa: E402
+from app.database import Base, SessionLocal, init_db  # noqa: E402
 from app.instagram.client import InstagramClient, RateLimiter  # noqa: E402
 from app.models import Account  # noqa: E402
 
@@ -99,5 +99,7 @@ def http_client(db: Session) -> TestClient:
     """FastAPI test client. The `db` fixture guarantees a clean database."""
     from app.main import app
 
-    with TestClient(app) as client:
+    # https, because PUBLIC_BASE_URL is https in this suite and the OAuth state
+    # cookie is therefore marked Secure — a plain-http client would drop it.
+    with TestClient(app, base_url="https://testserver") as client:
         yield client

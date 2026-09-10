@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app import scheduler as scheduler_module
 from app.config import Settings
 
@@ -49,3 +51,60 @@ class TestScheduler:
         # Both jobs swallow their errors so the scheduler keeps running.
         scheduler_module.run_collection_job()
         scheduler_module.run_token_refresh_job()
+
+
+class TestJobLock:
+    """The scheduler lives in the web process, so several workers would each
+    fire the same job unless they agree through the database."""
+
+    def test_the_lock_is_exclusive(self, db) -> None:
+        from app.scheduler import job_lock
+
+        with job_lock("demo") as first:
+            assert first is True
+            with job_lock("demo") as second:
+                assert second is False
+
+    def test_the_lock_is_released_afterwards(self, db) -> None:
+        from app.scheduler import job_lock
+
+        with job_lock("demo"):
+            pass
+        with job_lock("demo") as acquired:
+            assert acquired is True
+
+    def test_the_lock_is_released_even_when_the_job_raises(self, db) -> None:
+        from app.scheduler import job_lock
+
+        with pytest.raises(RuntimeError), job_lock("demo"):
+            raise RuntimeError("job blew up")
+
+        with job_lock("demo") as acquired:
+            assert acquired is True
+
+    def test_a_stale_lock_is_taken_over(self, db) -> None:
+        """A worker that dies without releasing must not block the job forever."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.models import JobLock
+        from app.scheduler import job_lock
+
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.add(JobLock(job_id="demo", owner="dead-worker:1", acquired_at=past, expires_at=past))
+        db.commit()
+
+        with job_lock("demo") as acquired:
+            assert acquired is True
+
+    def test_a_locked_job_does_not_run_its_body(self, db, monkeypatch) -> None:
+        from app import scheduler as scheduler_module
+
+        calls = []
+        monkeypatch.setattr(
+            scheduler_module, "collect_all_accounts", lambda *a, **k: calls.append(1) or []
+        )
+
+        with scheduler_module.job_lock(scheduler_module.COLLECT_JOB_ID):
+            scheduler_module.run_collection_job()
+
+        assert calls == []

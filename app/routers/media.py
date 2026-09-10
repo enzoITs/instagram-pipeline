@@ -12,9 +12,10 @@ from app.database import get_db
 from app.models import Account, Media
 from app.routers.accounts import get_account
 from app.schemas import MediaDetail, MediaPage, MediaWithLatest, SnapshotOut
+from app.security import require_session
 from app.services import analytics
 
-router = APIRouter(prefix="/api", tags=["media"])
+router = APIRouter(prefix="/api", tags=["media"], dependencies=[Depends(require_session)])
 
 
 @router.get(

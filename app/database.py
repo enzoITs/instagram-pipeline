@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, TypeDecorator, create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import DateTime, TypeDecorator, create_engine, event, inspect
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import get_settings
+from app.config import BASE_DIR, get_settings
+
+if TYPE_CHECKING:
+    from alembic.config import Config
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+MIGRATIONS_DIR = BASE_DIR / "migrations"
+
+# The revision describing the schema as it stood before Alembic was introduced.
+# Databases created by the old `create_all` path are stamped here so the later
+# revisions can be applied to them instead of failing.
+BASELINE_REVISION = "0001"
 
 _connect_args: dict[str, object] = {}
 if settings.database_url.startswith("sqlite"):
@@ -100,8 +114,83 @@ def session_scope() -> Iterator[Session]:
         db.close()
 
 
+def _alembic_config(connection) -> Config:  # noqa: ANN001
+    """Build an Alembic config bound to an already-open connection.
+
+    Passing the connection avoids re-reading the URL — and avoids Alembic's
+    ini interpolation choking on a password containing a percent sign.
+    """
+    from alembic.config import Config
+
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.attributes["connection"] = connection
+    return config
+
+
 def init_db() -> None:
-    """Create every table declared on `Base`."""
+    """Bring the database up to the current schema.
+
+    A brand-new database is created straight from the models and stamped at the
+    latest revision. An existing one is migrated: databases predating Alembic
+    carry no version table, so they are stamped at the baseline first and then
+    upgraded. Doing this at startup means a routine `git pull` never leaves the
+    schema behind the code.
+    """
+    from alembic import command
+
     from app import models  # noqa: F401  (registers the models on Base.metadata)
 
-    Base.metadata.create_all(bind=engine)
+    tables = set(inspect(engine).get_table_names())
+
+    with _migration_connection() as connection:
+        config = _alembic_config(connection)
+        if not tables:
+            Base.metadata.create_all(bind=connection)
+            command.stamp(config, "head")
+            logger.info("Created a new database at the latest schema revision.")
+            return
+        if "alembic_version" not in tables:
+            command.stamp(config, BASELINE_REVISION)
+            logger.info(
+                "Existing database had no migration history; stamped it at %s.",
+                BASELINE_REVISION,
+            )
+        command.upgrade(config, "head")
+
+
+@contextmanager
+def _migration_connection() -> Iterator[Connection]:
+    """Yield a connection safe to run schema changes on.
+
+    SQLite cannot alter a constraint in place, so Alembic rebuilds the table:
+    it copies the rows aside, DROPs the original and renames the copy. With
+    `PRAGMA foreign_keys=ON` — which this app sets on every connection — that
+    DROP cascades into the child tables and silently deletes the entire metric
+    history. Enforcement is therefore suspended for the duration of the
+    migration, which is the documented SQLite procedure, and the whole thing
+    runs outside a transaction because the pragma is ignored inside one.
+
+    Every other backend keeps its normal transactional DDL.
+    """
+    if engine.dialect.name != "sqlite":
+        with engine.begin() as connection:
+            yield connection
+        return
+
+    connection = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        yield connection
+        # A rebuild can leave dangling rows if the data was already
+        # inconsistent; surface that rather than re-enabling checks over it.
+        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            logger.error(
+                "Foreign key violations after migrating: %s. The schema changed "
+                "but some rows now point at missing parents.",
+                violations[:5],
+            )
+    finally:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.close()

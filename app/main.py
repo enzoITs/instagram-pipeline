@@ -18,6 +18,7 @@ from app.database import init_db
 from app.instagram.client import GraphAPIError
 from app.instagram.oauth import OAuthError
 from app.routers import accounts, auth, jobs, media, system
+from app.services.jobs_runtime import sweep_orphaned_runs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,16 +28,46 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Chart.js is the only third-party asset the dashboard loads. Everything else is
+# served from this origin, so the policy can stay tight.
+CONTENT_SECURITY_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self' https://cdn.jsdelivr.net",
+        # Inline style *attributes* are used by the dashboard markup.
+        "style-src 'self' 'unsafe-inline'",
+        # Post thumbnails are served from Meta's CDN, whose host varies.
+        "img-src 'self' data: https:",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ]
+)
+
+# Swagger UI and ReDoc ship their own inline bootstrap script, which the policy
+# above would block. They are developer tools, so they opt out instead.
+_CSP_EXEMPT_PATHS = frozenset({"/docs", "/redoc", "/docs/oauth2-redirect"})
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     init_db()
     logger.info("Database ready at %s", settings.database_url)
+    # A crash mid-collection leaves a run marked `running`, which would block
+    # every later collection for that account.
+    sweep_orphaned_runs()
     if not settings.is_configured:
         logger.warning(
             "INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET are not set. The dashboard "
             "runs, but connecting an account will fail. See SETUP.md."
+        )
+    if not settings.auth_enabled:
+        logger.warning(
+            "ADMIN_PASSWORD is not set: the dashboard and the API are open to "
+            "anyone who can reach this address. Set it before exposing the app "
+            "beyond localhost."
         )
     scheduler_module.start_scheduler()
     try:
@@ -66,6 +97,23 @@ app.include_router(jobs.router)
 app.include_router(system.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):  # noqa: ANN001, ANN201
+    """Attach the baseline browser hardening headers to every response."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if request.url.path not in _CSP_EXEMPT_PATHS:
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    if settings.public_base_url.startswith("https://"):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 
 @app.exception_handler(GraphAPIError)

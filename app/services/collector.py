@@ -26,10 +26,6 @@ from app.models import Account, CollectionRun, Media, MetricSnapshot, RunStatus,
 logger = logging.getLogger(__name__)
 
 
-class CollectionError(RuntimeError):
-    """Raised when a collection run cannot proceed at all."""
-
-
 @dataclass(slots=True)
 class CollectionResult:
     """Summary of one account's collection run."""
@@ -57,17 +53,23 @@ def collect_account(
     settings: Settings | None = None,
     trigger: str = "manual",
     limit: int | None = None,
+    run: CollectionRun | None = None,
 ) -> CollectionResult:
-    """Collect metrics for a single account and persist a snapshot per media."""
+    """Collect metrics for a single account and persist a snapshot per media.
+
+    Pass *run* to reuse a row created up front — that is how the API can hand
+    back a run id immediately and let the work finish in the background.
+    """
     settings = settings or get_settings()
     owns_client = client is None
     client = client or InstagramClient(settings)
     calls_before = client.call_count
 
-    run = CollectionRun(account_id=account.id, trigger=trigger, status=RunStatus.RUNNING)
-    db.add(run)
-    db.commit()
-    db.refresh(run)
+    if run is None:
+        run = CollectionRun(account_id=account.id, trigger=trigger, status=RunStatus.RUNNING)
+        db.add(run)
+        db.commit()
+        db.refresh(run)
 
     # One timestamp for the whole run keeps every snapshot aligned on the
     # dashboard's time axis and makes the run idempotent via the unique index.
@@ -75,116 +77,120 @@ def collect_account(
     media_seen = media_created = snapshots_created = 0
     failures: list[str] = []
 
-    try:
-        token = decrypt_token(account.access_token_encrypted)
-    except TokenDecryptionError as exc:
-        return _finish(db, run, RunStatus.FAILED, 0, 0, 0, 0, str(exc), account_id=account.id)
+    def calls() -> int:
+        return client.call_count - calls_before
 
+    # A single exit point owns the HTTP client, so no early return can leak the
+    # connection pool it holds.
     try:
-        _refresh_profile(db, account, token, client=client, settings=settings)
+        try:
+            token = decrypt_token(account.access_token_encrypted)
+        except TokenDecryptionError as exc:
+            return _finish(
+                db, run, RunStatus.FAILED, 0, 0, 0, calls(), str(exc),
+                account_id=account.id,
+            )
 
-        max_items = limit or settings.max_media_per_collection
-        items = client.get_paginated(
-            f"/{account.ig_user_id}/media",
-            access_token=token,
-            params={"fields": ",".join(MEDIA_FIELDS), "limit": min(max_items, 100)},
-            limit=max_items,
-        )
-    except GraphAPIError as exc:
-        if exc.is_token_error:
-            account.is_active = False
+        try:
+            _refresh_profile(db, account, token, client=client, settings=settings)
+
+            max_items = limit or settings.max_media_per_collection
+            items = client.get_paginated(
+                f"/{account.ig_user_id}/media",
+                access_token=token,
+                params={"fields": ",".join(MEDIA_FIELDS), "limit": min(max_items, 100)},
+                limit=max_items,
+            )
+        except GraphAPIError as exc:
+            if exc.is_token_error:
+                account.is_active = False
+                db.add(account)
+                db.commit()
+                message = (
+                    f"Access token rejected by Meta ({exc}). The account was marked "
+                    "inactive — reconnect it from the dashboard."
+                )
+            else:
+                message = f"Could not list media: {exc}"
+            return _finish(
+                db, run, RunStatus.FAILED, 0, 0, 0, calls(), message,
+                account_id=account.id,
+            )
+
+        try:
+            for item in items:
+                media_seen += 1
+                media, created = _upsert_media(db, account, item)
+                if created:
+                    media_created += 1
+
+                try:
+                    insights, warning = _fetch_insights(client, token, item)
+                except GraphAPIError as exc:
+                    if exc.is_token_error:
+                        raise
+                    failures.append(f"{media.ig_media_id}: {exc}")
+                    insights, warning = {}, None
+                if warning:
+                    failures.append(f"{media.ig_media_id}: {warning}")
+
+                metrics = _merge_metrics(item, insights)
+                rate, basis = compute_engagement_rate(metrics, account.followers_count)
+
+                snapshot = MetricSnapshot(
+                    media_id=media.id,
+                    collected_at=collected_at,
+                    likes=metrics.get("likes"),
+                    comments=metrics.get("comments"),
+                    saved=metrics.get("saved"),
+                    shares=metrics.get("shares"),
+                    reach=metrics.get("reach"),
+                    views=metrics.get("views"),
+                    total_interactions=total_interactions(metrics),
+                    profile_visits=metrics.get("profile_visits"),
+                    follows=metrics.get("follows"),
+                    engagement_rate=rate,
+                    engagement_basis=basis,
+                    raw={"media": item, "insights": insights},
+                )
+                db.add(snapshot)
+
+                media.last_snapshot_at = collected_at
+                media.latest_engagement_rate = rate
+                db.add(media)
+                snapshots_created += 1
+
+            account.last_collected_at = collected_at
             db.add(account)
             db.commit()
-            message = (
-                f"Access token rejected by Meta ({exc}). The account was marked "
-                "inactive — reconnect it from the dashboard."
+
+        except GraphAPIError as exc:
+            db.rollback()
+            if exc.is_token_error:
+                account.is_active = False
+                db.add(account)
+                db.commit()
+            return _finish(
+                db, run, RunStatus.FAILED, media_seen, media_created, 0, calls(),
+                f"Collection aborted: {exc}", account_id=account.id,
             )
-        else:
-            message = f"Could not list media: {exc}"
-        calls = client.call_count - calls_before
-        if owns_client:
-            client.close()
-        return _finish(db, run, RunStatus.FAILED, 0, 0, 0, calls, message, account_id=account.id)
-
-    try:
-        for item in items:
-            media_seen += 1
-            media, created = _upsert_media(db, account, item)
-            if created:
-                media_created += 1
-
-            try:
-                insights = _fetch_insights(client, token, item)
-            except GraphAPIError as exc:
-                if exc.is_token_error:
-                    raise
-                failures.append(f"{media.ig_media_id}: {exc}")
-                insights = {}
-
-            metrics = _merge_metrics(item, insights)
-            rate, basis = compute_engagement_rate(metrics, account.followers_count)
-
-            snapshot = MetricSnapshot(
-                media_id=media.id,
-                collected_at=collected_at,
-                likes=metrics.get("likes"),
-                comments=metrics.get("comments"),
-                saved=metrics.get("saved"),
-                shares=metrics.get("shares"),
-                reach=metrics.get("reach"),
-                views=metrics.get("views"),
-                total_interactions=total_interactions(metrics),
-                profile_visits=metrics.get("profile_visits"),
-                follows=metrics.get("follows"),
-                engagement_rate=rate,
-                engagement_basis=basis,
-                raw={"media": item, "insights": insights},
+        except Exception as exc:  # pragma: no cover - unexpected, still recorded
+            db.rollback()
+            logger.exception("Unexpected error during collection for account %s", account.id)
+            return _finish(
+                db, run, RunStatus.FAILED, media_seen, media_created, 0, calls(),
+                f"Unexpected error: {exc}", account_id=account.id,
             )
-            db.add(snapshot)
 
-            media.last_snapshot_at = collected_at
-            media.latest_engagement_rate = rate
-            db.add(media)
-            snapshots_created += 1
-
-        account.last_collected_at = collected_at
-        db.add(account)
-        db.commit()
-
-    except GraphAPIError as exc:
-        db.rollback()
-        if exc.is_token_error:
-            account.is_active = False
-            db.add(account)
-            db.commit()
-        calls = client.call_count - calls_before
+        status = RunStatus.PARTIAL if failures else RunStatus.SUCCESS
+        error = "; ".join(failures[:10]) if failures else None
+        return _finish(
+            db, run, status, media_seen, media_created, snapshots_created, calls(), error,
+            account_id=account.id,
+        )
+    finally:
         if owns_client:
             client.close()
-        return _finish(
-            db, run, RunStatus.FAILED, media_seen, media_created, 0, calls,
-            f"Collection aborted: {exc}", account_id=account.id,
-        )
-    except Exception as exc:  # pragma: no cover - unexpected, still recorded
-        db.rollback()
-        logger.exception("Unexpected error during collection for account %s", account.id)
-        calls = client.call_count - calls_before
-        if owns_client:
-            client.close()
-        return _finish(
-            db, run, RunStatus.FAILED, media_seen, media_created, 0, calls,
-            f"Unexpected error: {exc}", account_id=account.id,
-        )
-
-    calls = client.call_count - calls_before
-    if owns_client:
-        client.close()
-
-    status = RunStatus.PARTIAL if failures else RunStatus.SUCCESS
-    error = "; ".join(failures[:10]) if failures else None
-    return _finish(
-        db, run, status, media_seen, media_created, snapshots_created, calls, error,
-        account_id=account.id,
-    )
 
 
 def collect_all_accounts(
@@ -247,9 +253,17 @@ def _refresh_profile(
 
 
 def _upsert_media(db: Session, account: Account, item: dict[str, Any]) -> tuple[Media, bool]:
-    """Insert or update the Media row for one API item."""
+    """Insert or update the Media row for one API item.
+
+    The lookup is scoped to *account*: an unscoped match would silently attach
+    this account's snapshots to another account's post.
+    """
     ig_media_id = str(item["id"])
-    media = db.scalar(select(Media).where(Media.ig_media_id == ig_media_id))
+    media = db.scalar(
+        select(Media).where(
+            Media.ig_media_id == ig_media_id, Media.account_id == account.id
+        )
+    )
     created = media is None
     if media is None:
         media = Media(account_id=account.id, ig_media_id=ig_media_id)
@@ -269,13 +283,22 @@ def _upsert_media(db: Session, account: Account, item: dict[str, Any]) -> tuple[
 
 def _fetch_insights(
     client: InstagramClient, token: str, item: dict[str, Any]
-) -> dict[str, int]:
-    """Fetch insights, dropping metrics this media type does not support."""
+) -> tuple[dict[str, int], str | None]:
+    """Fetch insights, dropping metrics this media type does not support.
+
+    Returns ``(insights, warning)``. Meta rejects unsupported metrics one name
+    at a time, so a media type that supports none of the five requested metrics
+    needs five rounds — capping the loop lower used to make the collector give
+    up and record an empty, *successful*-looking snapshot. The warning is set
+    only when insights were abandoned entirely, which the caller reports as a
+    partial run instead of a silent success.
+    """
     wanted = list(metrics_for(item.get("media_product_type")))
     if not wanted:
-        return {}
+        return {}, None
 
-    for _ in range(3):
+    # One round per metric that could be rejected, plus the final good call.
+    for _ in range(len(wanted) + 1):
         try:
             payload = client.get(
                 f"/{item['id']}/insights",
@@ -294,7 +317,10 @@ def _fetch_insights(
                     item.get("media_product_type"),
                     exc.message,
                 )
-                return {}
+                return {}, (
+                    "no insight metric is supported for this post "
+                    f"({item.get('media_product_type') or 'unknown type'})"
+                )
             logger.info(
                 "Dropping unsupported metrics %s for media %s and retrying.",
                 sorted(offending),
@@ -302,9 +328,14 @@ def _fetch_insights(
             )
             wanted = remaining
             continue
-        return parse_insights(payload)
+        return parse_insights(payload), None
 
-    return {}
+    logger.warning(
+        "Gave up fetching insights for media %s after too many unsupported-metric "
+        "rounds; the snapshot keeps only the post's own counters.",
+        item.get("id"),
+    )
+    return {}, "insights were abandoned after repeated unsupported-metric errors"
 
 
 def _merge_metrics(item: dict[str, Any], insights: dict[str, int]) -> dict[str, int | None]:

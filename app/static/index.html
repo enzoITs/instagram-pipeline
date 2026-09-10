@@ -25,12 +25,26 @@
       <button id="btn-collect" class="btn btn-primary" hidden>Coletar agora</button>
       <button id="btn-export" class="btn" hidden>Exportar CSV</button>
       <a id="btn-connect" class="btn btn-primary" href="/auth/login" hidden>Conectar Instagram</a>
+      <button id="btn-logout" class="btn btn-sm" hidden>Sair</button>
     </div>
   </header>
 
   <div id="banner" class="banner" hidden></div>
 
   <main id="main">
+    <!-- Login: only shown when ADMIN_PASSWORD is configured -->
+    <section id="login-state" class="empty" hidden>
+      <h2>Entrar</h2>
+      <p>Este painel está protegido por senha.</p>
+      <form id="login-form" class="login-form" autocomplete="on">
+        <label class="visually-hidden" for="login-password">Senha</label>
+        <input id="login-password" class="input" type="password" name="password"
+               placeholder="Senha do painel" autocomplete="current-password" required>
+        <button class="btn btn-primary" type="submit">Entrar</button>
+      </form>
+      <p id="login-error" class="hint" hidden></p>
+    </section>
+
     <!-- Estado inicial: nenhuma conta conectada -->
     <section id="empty-state" class="empty" hidden>
       <h2>Nenhuma conta conectada</h2>
@@ -105,7 +119,6 @@
               <option value="">Todos os formatos</option>
               <option value="FEED">Feed</option>
               <option value="REELS">Reels</option>
-              <option value="STORY">Stories</option>
             </select>
             <select id="sort-select" class="select">
               <option value="timestamp:desc">Mais recentes</option>

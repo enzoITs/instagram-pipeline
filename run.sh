@@ -14,8 +14,10 @@ echo "==> Installing dependencies"
 ./.venv/bin/pip install --quiet -r requirements.txt
 
 if [ ! -f .env ]; then
-  echo "==> No .env found; copying .env.example. Fill in your Meta credentials."
-  cp .env.example .env
+  # Deliberately not copied automatically: the example file is a template full
+  # of blank values, and an empty SECRET_KEY is worse than an absent one.
+  echo "==> No .env found. The dashboard will start, but connecting an account"
+  echo "    needs Meta credentials. To configure:  cp .env.example .env"
 fi
 
 HOST="${HOST:-127.0.0.1}"

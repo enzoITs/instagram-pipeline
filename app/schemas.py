@@ -147,16 +147,27 @@ class TokenRefreshOut(BaseModel):
 
 # --------------------------------------------------------------------- system
 class HealthOut(BaseModel):
+    """Service state. Everything past `database` is omitted for anonymous
+    callers, so the probe stays usable without leaking the configuration."""
+
     status: str
-    environment: str
-    database: str
-    meta_configured: bool
-    login_flow: str
-    graph_api_version: str
-    scheduler_running: bool
-    connected_accounts: int
+    auth_required: bool = False
+    database: str = "ok"
+    environment: str | None = None
+    meta_configured: bool | None = None
+    login_flow: str | None = None
+    graph_api_version: str | None = None
+    scheduler_running: bool | None = None
+    connected_accounts: int | None = None
     next_collection_at: datetime | None = None
 
 
-class MessageOut(BaseModel):
-    detail: str
+class SessionOut(BaseModel):
+    """Whether the dashboard needs a login, and whether this caller has one."""
+
+    auth_required: bool
+    authenticated: bool
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)

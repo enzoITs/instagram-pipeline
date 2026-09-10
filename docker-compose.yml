@@ -12,3 +12,8 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    # The scheduler runs inside the web process and takes a database lock, so
+    # extra replicas would contend rather than duplicate work — but a single
+    # instance is the intended shape for this app.
+    deploy:
+      replicas: 1

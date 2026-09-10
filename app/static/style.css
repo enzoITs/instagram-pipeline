@@ -197,3 +197,16 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
   gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border);
 }
 .dialog-body { padding: 20px; overflow-y: auto; }
+
+/* Login ------------------------------------------------------------------ */
+.login-form {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.login-form .input {
+  min-width: 240px;
+}

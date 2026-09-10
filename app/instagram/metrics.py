@@ -9,13 +9,16 @@ not support one of them.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 # Metrics fetched from the /insights edge, grouped by `media_product_type`.
+# Stories are deliberately absent: the /media edge this pipeline reads never
+# returns them, they expire after 24 hours, and collecting them would need a
+# separate edge plus a much tighter schedule. See the README limitations.
 INSIGHT_METRICS: dict[str, tuple[str, ...]] = {
     "FEED": ("reach", "saved", "shares", "views", "total_interactions"),
     "REELS": ("reach", "saved", "shares", "views", "total_interactions"),
-    "STORY": ("reach", "shares", "views", "total_interactions", "profile_visits", "follows"),
     "AD": (),  # Ads are not supported by the media insights edge.
 }
 
@@ -46,19 +49,6 @@ ACCOUNT_FIELDS: tuple[str, ...] = (
     "profile_picture_url",
     "followers_count",
     "media_count",
-)
-
-# Columns on MetricSnapshot that can be filled straight from an insight name.
-SNAPSHOT_METRIC_COLUMNS: tuple[str, ...] = (
-    "likes",
-    "comments",
-    "saved",
-    "shares",
-    "reach",
-    "views",
-    "total_interactions",
-    "profile_visits",
-    "follows",
 )
 
 # Interactions that make up the numerator of the engagement rate.
@@ -107,17 +97,27 @@ def compute_engagement_rate(
 
     Returns ``(rate, basis)`` where *basis* is the denominator that was used —
     ``"reach"`` when reach is known (the meaningful denominator, since it counts
-    the accounts that actually saw the post) or ``"followers"`` as a fallback.
-    Returns ``(None, None)`` when neither denominator is usable, so the
-    dashboard can show "no data" instead of a misleading zero.
+    the accounts that actually saw the post) or ``"followers"`` when Meta did
+    not return reach at all. Returns ``(None, None)`` when no denominator can be
+    trusted, so the dashboard can show "no data" instead of a misleading zero.
+
+    A reported ``reach == 0`` is a measurement, not a gap: the post reached
+    nobody. Falling back to the follower count there would invent a denominator
+    and report engagement against an audience that never saw the post, which is
+    why zero reach is handled apart from missing reach.
     """
     interactions = _sum_present(metrics, ENGAGEMENT_COMPONENTS)
     if interactions is None:
         return None, None
 
     reach = metrics.get("reach")
-    if isinstance(reach, int) and reach > 0:
-        return round(interactions / reach * 100, 2), "reach"
+    if isinstance(reach, int):
+        if reach > 0:
+            return round(interactions / reach * 100, 2), "reach"
+        # Zero reach with interactions on top of it is self-contradictory —
+        # Meta reports this for posts published before the profile became a
+        # business account. Neither denominator describes reality, so say so.
+        return (0.0, "reach") if interactions == 0 else (None, None)
 
     if isinstance(followers_count, int) and followers_count > 0:
         return round(interactions / followers_count * 100, 2), "followers"

@@ -17,7 +17,8 @@ Tempo estimado: 30 a 45 minutos (a maior parte é esperar telas da Meta).
 | 3 | **App ID** e **App Secret** | Sim | Painel do app na Meta |
 | 4 | URL pública HTTPS (redirect URI) | Sim | ngrok / Cloudflare Tunnel / seu domínio |
 | 5 | `SECRET_KEY` e `TOKEN_ENCRYPTION_KEY` | Sim (produção) | Gerados por comando local |
-| 6 | Revisão do app (*App Review*) | Só para contas de terceiros | Painel do app na Meta |
+| 6 | `ADMIN_PASSWORD` (senha do dashboard) | Sim, se o endereço não for só seu | Escolhida por você |
+| 7 | Revisão do app (*App Review*) | Só para contas de terceiros | Painel do app na Meta |
 
 Nenhum destes itens tem custo. A Graph API do Instagram é gratuita dentro dos
 limites de requisição.
@@ -156,11 +157,22 @@ No `.env`:
 ```env
 SECRET_KEY=<primeiro valor>
 TOKEN_ENCRYPTION_KEY=<segundo valor>
+ADMIN_PASSWORD=<a senha que você vai usar para entrar no dashboard>
 ```
 
 > Se `TOKEN_ENCRYPTION_KEY` ficar vazio, uma chave é derivada de `SECRET_KEY` —
 > aceitável para desenvolvimento. **Trocar `SECRET_KEY` depois invalida todos os
 > tokens já salvos**, e as contas precisarão ser reconectadas.
+
+> Em desenvolvimento você pode deixar `SECRET_KEY` comentada: o app gera uma
+> chave na primeira execução e a guarda em `data/.secret_key`, então reiniciar
+> não derruba os tokens salvos. Deixar a linha presente e **vazia** é diferente
+> disso e não é aceito. Com `ENVIRONMENT=production` o app se recusa a subir
+> sem uma chave de verdade.
+
+> `ADMIN_PASSWORD` vazia significa **nenhuma autenticação**: qualquer um que
+> alcance a URL vê os dados, dispara coletas (gastando sua cota da Meta) e pode
+> desconectar contas. Como o túnel do Passo 4 é um endereço público, preencha.
 
 ---
 
@@ -171,8 +183,10 @@ cp .env.example .env     # e preencha os valores dos passos acima
 ./run.sh                 # cria o venv, instala tudo e sobe o servidor
 ```
 
-Abra a URL pública do túnel (não `localhost`) e clique em
-**Conectar Instagram**. Depois de autorizar, clique em **Coletar agora**.
+Abra a URL pública do túnel (não `localhost`). Se `ADMIN_PASSWORD` estiver
+definida, o dashboard pede a senha antes de mostrar qualquer coisa. Depois
+clique em **Conectar Instagram** e, terminada a autorização, em **Coletar
+agora** — a coleta roda em segundo plano e a tela acompanha o progresso.
 
 ---
 
@@ -210,6 +224,7 @@ O prazo costuma ser de alguns dias úteis.
 - [ ] `<PUBLIC_BASE_URL>/auth/callback` registrado como URI de redirecionamento
 - [ ] Sua conta aceita como testadora do app
 - [ ] `SECRET_KEY` e `TOKEN_ENCRYPTION_KEY` preenchidos
+- [ ] `ADMIN_PASSWORD` definida (o endereço do túnel é público)
 - [ ] `./run.sh` sobe sem erros e `/api/health` responde `"meta_configured": true`
 - [ ] Botão "Coletar agora" traz posts reais
 

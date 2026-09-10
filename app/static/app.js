@@ -66,7 +66,9 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const detail = (payload && (payload.detail || payload.message)) || `HTTP ${response.status}`;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -94,6 +96,59 @@ async function boot() {
   readUrlFlags();
   wireEvents();
 
+  try {
+    const session = await api("/auth/session");
+    if (session.auth_required && !session.authenticated) {
+      showLogin();
+      return;
+    }
+    el("btn-logout").hidden = !session.auth_required;
+  } catch (error) {
+    el("footer-status").textContent = `Falha ao contatar a API: ${error.message}`;
+    return;
+  }
+
+  await loadDashboard();
+}
+
+function showLogin() {
+  el("login-state").hidden = false;
+  el("empty-state").hidden = true;
+  el("dashboard").hidden = true;
+  el("footer-status").textContent = "Não autenticado";
+  el("login-password").focus();
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const error = el("login-error");
+  error.hidden = true;
+  try {
+    await api("/auth/session", {
+      method: "POST",
+      body: JSON.stringify({ password: el("login-password").value }),
+    });
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  }
+  el("login-state").hidden = true;
+  el("login-password").value = "";
+  el("btn-logout").hidden = false;
+  await loadDashboard();
+}
+
+async function logout() {
+  try {
+    await api("/auth/session", { method: "DELETE" });
+  } catch {
+    /* signing out locally is enough to get back to the form */
+  }
+  window.location.reload();
+}
+
+async function loadDashboard() {
   let health = null;
   try {
     health = await api("/api/health");
@@ -109,6 +164,10 @@ async function boot() {
   try {
     state.accounts = await api("/api/accounts");
   } catch (error) {
+    if (error.status === 401) {
+      showLogin();
+      return;
+    }
     showBanner(`Não foi possível carregar as contas: ${error.message}`, "error");
     return;
   }
@@ -149,6 +208,8 @@ function readUrlFlags() {
 }
 
 function wireEvents() {
+  el("login-form").addEventListener("submit", submitLogin);
+  el("btn-logout").addEventListener("click", logout);
   el("account-select").addEventListener("change", (event) => {
     selectAccount(Number(event.target.value));
   });
@@ -398,6 +459,12 @@ async function loadMedia() {
     renderMediaRows(page.items);
     updatePager();
   } catch (error) {
+    if (error.status === 401) {
+      showLogin();
+      return;
+    }
+    state.total = 0;
+    updatePager();
     body.innerHTML = `<tr><td colspan="10" class="hint">Falha ao carregar posts: ${escapeHtml(error.message)}</td></tr>`;
   }
 }
@@ -422,7 +489,7 @@ function renderMediaRows(items) {
       return `<tr>
         <td>
           <div class="post-cell">
-            ${thumb ? `<img class="post-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" onerror="this.remove()">` : ""}
+            ${thumb ? `<img class="post-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" data-fallback="hide">` : ""}
             <div>
               <button class="linkish post-caption" data-media-id="${item.id}" title="Ver histórico">${escapeHtml(caption)}</button>
               <div>${permalink}</div>
@@ -444,6 +511,12 @@ function renderMediaRows(items) {
 
   body.querySelectorAll("button[data-media-id]").forEach((button) => {
     button.addEventListener("click", () => openMediaDialog(Number(button.dataset.mediaId)));
+  });
+  // Meta's thumbnail URLs expire; drop the broken image rather than showing
+  // the browser's placeholder. Bound here because an inline `onerror` would
+  // require loosening the Content-Security-Policy.
+  body.querySelectorAll("img[data-fallback]").forEach((image) => {
+    image.addEventListener("error", () => image.remove(), { once: true });
   });
 }
 
@@ -485,24 +558,15 @@ async function collectNow() {
   const button = el("btn-collect");
   button.disabled = true;
   button.textContent = "Coletando…";
-  showBanner("Coletando métricas na Meta… isso pode levar alguns minutos para muitos posts.", "warn");
+  showBanner(
+    "Coleta iniciada na Meta. Ela continua no servidor mesmo se você fechar esta aba.",
+    "warn"
+  );
 
   try {
-    const result = await api(`/api/accounts/${state.accountId}/collect`, { method: "POST" });
-    if (result.status === "failed") {
-      showBanner(`A coleta falhou: ${result.error}`, "error");
-    } else if (result.status === "partial") {
-      showBanner(
-        `Coleta parcial: ${result.snapshots_created} posts salvos, com avisos — ${result.error}`,
-        "warn"
-      );
-    } else {
-      showBanner(
-        `Coleta concluída: ${result.snapshots_created} posts atualizados em ${result.api_calls} chamadas à API.`,
-        "ok",
-        8000
-      );
-    }
+    const started = await api(`/api/accounts/${state.accountId}/collect`, { method: "POST" });
+    const run = await pollRun(started.run_id, button);
+    reportRun(run);
     state.accounts = await api("/api/accounts");
     renderAccountSelect();
     await selectAccount(state.accountId);
@@ -511,6 +575,47 @@ async function collectNow() {
   } finally {
     button.disabled = false;
     button.textContent = "Coletar agora";
+  }
+}
+
+/* A run can take minutes, so the browser follows it instead of holding the
+   request open — a proxy would time out long before a large account finishes. */
+async function pollRun(runId, button) {
+  const startedAt = Date.now();
+  const timeoutMs = 30 * 60 * 1000;
+  let delay = 1000;
+
+  for (;;) {
+    const run = await api(`/api/runs/${runId}`);
+    if (run.status !== "running") return run;
+
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(
+        "A coleta ainda está em andamento no servidor. Recarregue a página em alguns minutos."
+      );
+    }
+    if (button && run.media_seen) {
+      button.textContent = `Coletando… ${run.media_seen}`;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 1.5, 5000);
+  }
+}
+
+function reportRun(run) {
+  if (run.status === "failed") {
+    showBanner(`A coleta falhou: ${run.error}`, "error");
+  } else if (run.status === "partial") {
+    showBanner(
+      `Coleta parcial: ${run.snapshots_created} posts salvos, com avisos — ${run.error}`,
+      "warn"
+    );
+  } else {
+    showBanner(
+      `Coleta concluída: ${run.snapshots_created} posts atualizados em ${run.api_calls} chamadas à API.`,
+      "ok",
+      8000
+    );
   }
 }
 

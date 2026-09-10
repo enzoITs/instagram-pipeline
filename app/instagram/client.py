@@ -121,6 +121,31 @@ class RateLimiter:
             return len(self._calls)
 
 
+# The per-hour budget is a property of the Meta app, not of one client object.
+# Giving every client its own limiter meant each manual collection started with
+# an empty window, so the configured ceiling was never actually enforced across
+# runs.
+_shared_limiter: RateLimiter | None = None
+_shared_limiter_lock = threading.Lock()
+
+
+def get_shared_rate_limiter(settings: Settings | None = None) -> RateLimiter:
+    """Return the process-wide limiter, creating it on first use."""
+    global _shared_limiter
+    with _shared_limiter_lock:
+        if _shared_limiter is None:
+            settings = settings or get_settings()
+            _shared_limiter = RateLimiter(settings.api_calls_per_hour)
+        return _shared_limiter
+
+
+def reset_shared_rate_limiter() -> None:
+    """Drop the shared limiter. Intended for tests."""
+    global _shared_limiter
+    with _shared_limiter_lock:
+        _shared_limiter = None
+
+
 class InstagramClient:
     """Thin, retrying wrapper around the Graph API.
 
@@ -143,7 +168,7 @@ class InstagramClient:
             follow_redirects=True,
             headers={"User-Agent": "instagram-pipeline/1.0"},
         )
-        self.rate_limiter = rate_limiter or RateLimiter(self.settings.api_calls_per_hour)
+        self.rate_limiter = rate_limiter or get_shared_rate_limiter(self.settings)
         self._sleep = sleeper
         self.call_count = 0
 
@@ -152,7 +177,7 @@ class InstagramClient:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "InstagramClient":
+    def __enter__(self) -> InstagramClient:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

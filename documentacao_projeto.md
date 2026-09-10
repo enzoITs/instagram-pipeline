@@ -1,10 +1,10 @@
-# [Nome do Projeto] — Documentação do Projeto
+# Instagram Pipeline — Documentação do Projeto
 
 ## 1. Objetivo e Problema Resolvido
 
 Hoje, saber se um vídeo ou Reel "performou bem" no Instagram exige entrar no app, abrir cada post individualmente e anotar os números manualmente — um processo lento, sujeito a erro e sem histórico organizado ao longo do tempo.
 
-O **[Nome do Projeto]** resolve isso automatizando a coleta de métricas de engajamento (curtidas, comentários, salvamentos, alcance, impressões e visualizações) diretamente da API oficial da Meta. O sistema guarda um histórico próprio desses dados e os apresenta em um dashboard, permitindo acompanhar a evolução do engajamento sem trabalho manual e comparar posts entre si ao longo do tempo.
+O **Instagram Pipeline** resolve isso automatizando a coleta de métricas de engajamento (curtidas, comentários, salvamentos, compartilhamentos, alcance e visualizações) diretamente da API oficial da Meta. O sistema guarda um histórico próprio desses dados e os apresenta em um dashboard, permitindo acompanhar a evolução do engajamento sem trabalho manual e comparar posts entre si ao longo do tempo.
 
 ## 2. Como o Sistema Funciona
 
@@ -38,8 +38,9 @@ O **[Nome do Projeto]** resolve isso automatizando a coleta de métricas de enga
 
 - **Limite de requisições da API** (a Meta permite um número limitado de chamadas por hora): o sistema busca os dados em lotes programados, em vez de em tempo real, evitando estourar esse limite.
 - **Tempo de retenção de dados da Meta**: a Meta não mantém o histórico de métricas indefinidamente. Por isso, o sistema salva cada coleta em seu próprio banco de dados, preservando o histórico mesmo depois que a Meta descarta os dados originais.
+- **Acesso ao painel**: o sistema guarda tokens de acesso válidos por 60 dias e consome a cota de chamadas da Meta, então o painel fica protegido por uma senha de administrador. Definida essa senha, toda a API e o dashboard exigem login; só a verificação de disponibilidade do serviço responde sem sessão.
 - **Aprovação da Meta para uso público**: gerenciar apenas a própria conta não exige revisão da Meta. Se o sistema for expandido para gerenciar contas de terceiros (ex: uma agência atendendo vários clientes), será necessário passar pelo processo de revisão de app (*App Review*) da Meta antes de liberar o acesso a esses usuários externos.
 
 ## 6. Público-Alvo e Benefício Principal
 
-O **[Nome do Projeto]** é voltado para equipes de marketing, criadores de conteúdo e agências que gerenciam presença no Instagram e precisam entender o que funciona. O principal benefício é substituir a coleta manual e dispersa de números por um histórico centralizado e confiável, permitindo decisões de conteúdo baseadas em dados reais de engajamento ao longo do tempo, em vez de impressões pontuais.
+O **Instagram Pipeline** é voltado para equipes de marketing, criadores de conteúdo e agências que gerenciam presença no Instagram e precisam entender o que funciona. O principal benefício é substituir a coleta manual e dispersa de números por um histórico centralizado e confiável, permitindo decisões de conteúdo baseadas em dados reais de engajamento ao longo do tempo, em vez de percepções pontuais.

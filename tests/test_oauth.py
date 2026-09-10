@@ -14,6 +14,7 @@ from app.instagram.oauth import (
     build_authorization_url,
     exchange_code,
     make_state,
+    new_nonce,
     refresh_long_lived_token,
     verify_state,
 )
@@ -51,16 +52,42 @@ class TestAuthorizationUrl:
 
 class TestState:
     def test_round_trip(self, settings) -> None:
-        assert verify_state(make_state(settings), settings) == {"v": 1}
+        nonce = new_nonce()
+        state = make_state(settings, nonce=nonce)
+        assert verify_state(state, settings, expected_nonce=nonce) == {
+            "v": 1,
+            "nonce": nonce,
+        }
 
     def test_tampered_state_is_rejected(self, settings) -> None:
+        nonce = new_nonce()
         with pytest.raises(OAuthError, match="Invalid OAuth state"):
-            verify_state(make_state(settings) + "x", settings)
+            verify_state(
+                make_state(settings, nonce=nonce) + "x", settings, expected_nonce=nonce
+            )
 
     def test_state_signed_with_another_key_is_rejected(self, settings) -> None:
         other = Settings(secret_key="a-completely-different-secret-key-value")
+        nonce = new_nonce()
         with pytest.raises(OAuthError):
-            verify_state(make_state(other), settings)
+            verify_state(
+                make_state(other, nonce=nonce), settings, expected_nonce=nonce
+            )
+
+    def test_a_state_without_a_nonce_is_rejected(self, settings) -> None:
+        """Anyone can mint a signed state by starting their own login."""
+        with pytest.raises(OAuthError, match="no browser binding"):
+            verify_state(make_state(settings), settings, expected_nonce=new_nonce())
+
+    def test_a_state_from_another_browser_is_rejected(self, settings) -> None:
+        state = make_state(settings, nonce=new_nonce())
+        with pytest.raises(OAuthError, match="does not match the browser"):
+            verify_state(state, settings, expected_nonce=new_nonce())
+
+    def test_a_missing_cookie_is_rejected(self, settings) -> None:
+        state = make_state(settings, nonce=new_nonce())
+        with pytest.raises(OAuthError, match="did not start in this browser"):
+            verify_state(state, settings, expected_nonce=None)
 
 
 class TestExchangeCode:

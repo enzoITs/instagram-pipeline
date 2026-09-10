@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -140,7 +141,7 @@ def engagement_timeseries(
 
 
 def media_type_breakdown(db: Session, account: Account) -> list[dict[str, Any]]:
-    """Average engagement per media product type (FEED vs REELS vs STORY)."""
+    """Average engagement per media product type (FEED vs REELS)."""
     newest = latest_snapshot_subquery()
     stmt = (
         select(
@@ -177,6 +178,15 @@ def media_type_breakdown(db: Session, account: Account) -> list[dict[str, Any]]:
     return result
 
 
+def escape_like(term: str) -> str:
+    """Neutralise LIKE wildcards so a search for "%" matches a literal percent.
+
+    Without this, typing `%` or `_` in the dashboard search box silently
+    matches every post instead of none.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def media_query(
     account_id: int,
     *,
@@ -188,7 +198,7 @@ def media_query(
     if media_product_type:
         stmt = stmt.where(Media.media_product_type == media_product_type.upper())
     if search:
-        stmt = stmt.where(Media.caption.ilike(f"%{search}%"))
+        stmt = stmt.where(Media.caption.ilike(f"%{escape_like(search)}%", escape="\\"))
     return stmt
 
 
