@@ -1,0 +1,143 @@
+name: instagram-analyzer
+
+# Shared configuration for the API and the Celery worker.
+# Values are interpolated from the project-level `.env` file (see .env.example).
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-analyzer}:${POSTGRES_PASSWORD:-analyzer}@postgres:5432/${POSTGRES_DB:-analyzer}
+  DB_POOL_MIN: ${DB_POOL_MIN:-5}
+  DB_POOL_MAX: ${DB_POOL_MAX:-50}
+  REDIS_URL: redis://redis:6379/0
+  REDIS_POOL_MAX: ${REDIS_POOL_MAX:-20}
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  TASK_BACKEND: celery
+  CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-86400}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+  RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-10}
+  # The frontend nginx proxies /api and appends the real client IP to X-Forwarded-For.
+  TRUST_PROXY_HEADERS: "true"
+  SCRAPER_MODE: ${SCRAPER_MODE:-auto}
+  APIFY_TOKEN: ${APIFY_TOKEN:-}
+  APIFY_TIMEOUT_SECONDS: ${APIFY_TIMEOUT_SECONDS:-90}
+  MAX_COMMENTS: ${MAX_COMMENTS:-500}
+  INSTAGRAM_USERNAME: ${INSTAGRAM_USERNAME:-}
+  INSTAGRAM_SESSIONFILE: ${INSTAGRAM_SESSIONFILE:-}
+  NLP_BACKEND: ${NLP_BACKEND:-transformers}
+  SENTIMENT_MODEL: ${SENTIMENT_MODEL:-cardiffnlp/twitter-xlm-roberta-base-sentiment}
+  INTENT_MODEL: ${INTENT_MODEL:-MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli}
+  NLP_INTENT_ZERO_SHOT: ${NLP_INTENT_ZERO_SHOT:-true}
+  NLP_BATCH_SIZE: ${NLP_BATCH_SIZE:-32}
+  NLP_DEVICE: ${NLP_DEVICE:-auto}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4-turbo}
+  OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
+
+services:
+  postgres:
+    image: docker.io/library/postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-analyzer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-analyzer}
+      POSTGRES_DB: ${POSTGRES_DB:-analyzer}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-analyzer} -d ${POSTGRES_DB:-analyzer}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [data]
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence keeps queued jobs across restarts; noeviction protects broker keys
+    # (cache entries always carry a TTL, so memory is reclaimed on expiry).
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [data]
+
+  backend:
+    build:
+      context: ./backend
+      target: api
+    image: instagram-analyzer-api:latest
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks: [data, web]
+
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    image: instagram-analyzer-worker:latest
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      # Hugging Face models are downloaded once and reused across restarts.
+      - hf_cache:/home/app/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+    networks: [data]
+
+  frontend:
+    build:
+      context: ./frontend
+    image: instagram-analyzer-frontend:latest
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [web]
+
+networks:
+  data:
+  web:
+
+volumes:
+  pg_data:
+  redis_data:
+  hf_cache:

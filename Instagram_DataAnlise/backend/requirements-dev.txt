@@ -1,0 +1,10 @@
+-r requirements-worker.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+fakeredis==2.38.0
+respx==0.23.1
+aiosqlite==0.22.1
+flake8==7.3.0
+mypy==2.3.1
