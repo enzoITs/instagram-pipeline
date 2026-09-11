@@ -115,7 +115,7 @@ def retry_call(
     attempts: int,
     deadline: float,
     operation: str,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> T:
     """Call `func(remaining_seconds)` with exponential backoff (1s, 2s, 4s... + jitter).
 
@@ -138,7 +138,7 @@ def retry_call(
                 "scraper_retry",
                 extra={"operation": operation, "attempt": attempt, "delay_s": round(delay, 2), "error": str(exc)},
             )
-            sleep(delay)
+            (sleep or time.sleep)(delay)
     raise ScraperError(f"{operation}: tentativas esgotadas", transient=True)  # pragma: no cover
 
 
@@ -325,7 +325,8 @@ class InstagramScraper:
             raise ScraperError(f"post indisponível ({reason})", transient=False, source="apify")
 
         item = next((p for p in posts if p.get("shortCode") == parsed.shortcode), posts[0])
-        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        raw_owner = item.get("owner")
+        owner: dict[str, Any] = raw_owner if isinstance(raw_owner, dict) else {}
         raw_comments: Iterable[dict[str, Any]] = (
             comment_items if comment_items is not None else item.get("latestComments") or []
         )
@@ -417,7 +418,7 @@ class InstagramScraper:
         )
 
     def _build_instaloader(self, instaloader: Any) -> Any:
-        class BoundedRateController(instaloader.RateController):  # type: ignore[misc,name-defined]
+        class BoundedRateController(instaloader.RateController):
             """Instaloader sleeps for minutes when rate limited; fail fast instead."""
 
             def sleep(self, secs: float) -> None:
@@ -456,7 +457,8 @@ class InstagramScraper:
             text = " ".join(str(raw.get("text") or "").split())[:MAX_COMMENT_LENGTH]
             if not text:
                 continue
-            owner = raw.get("owner") if isinstance(raw.get("owner"), dict) else {}
+            raw_owner = raw.get("owner")
+            owner: dict[str, Any] = raw_owner if isinstance(raw_owner, dict) else {}
             author = raw.get("ownerUsername") or owner.get("username") or raw.get("username")
             timestamp = raw.get("timestamp") or raw.get("created_at")
             comment_id = str(raw.get("id") or raw.get("pk") or "").strip()

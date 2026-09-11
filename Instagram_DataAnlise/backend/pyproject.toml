@@ -20,6 +20,9 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["app"]
 branch = true
+# SQLAlchemy's asyncio layer switches greenlets; without this, lines after an awaited
+# query are wrongly reported as not covered.
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 show_missing = true

@@ -257,7 +257,7 @@ class InsightsGenerator:
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
     def _call_openai(self, messages: list[dict[str, str]]) -> str:
-        client = self._client
+        client: Any = self._client
         if client is None:
             from openai import OpenAI
 

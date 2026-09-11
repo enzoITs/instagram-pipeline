@@ -113,7 +113,7 @@ app.add_middleware(RequestContextMiddleware)
 
 
 def get_cache(request: Request) -> CacheService:
-    return request.app.state.cache  # type: ignore[no-any-return]
+    return request.app.state.cache
 
 
 def _as_utc(value: datetime) -> datetime:
