@@ -84,6 +84,7 @@ def recent_statement(limit: int, offset: int) -> Select[Any]:
         select(
             Video.id,
             Video.instagram_id,
+            Video.url,
             Video.creator_username,
             Video.status,
             Video.created_at,

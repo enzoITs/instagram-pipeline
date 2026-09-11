@@ -244,6 +244,7 @@ async def test_recent_pagination(client, make_video):
     assert first["pagination"] == {"total": 12, "limit": 5, "offset": 0, "page": 1}
     assert [item["instagram_id"] for item in first["data"]] == [f"RECENT{index:02d}" for index in range(5)]
     assert first["data"][0]["creator_username"] == "@brand"
+    assert first["data"][0]["url"] == "https://www.instagram.com/reel/RECENT00/"
     assert first["data"][0]["engagement_score"] is None
 
     third = (await client.get("/api/v1/recent", params={"limit": 5, "offset": 10})).json()

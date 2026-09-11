@@ -192,6 +192,7 @@ class AnalysisErrorResponse(APIModel):
 class RecentItem(APIModel):
     id: UUID
     instagram_id: str
+    url: str | None = None
     creator_username: str | None = None
     status: VideoStatus
     created_at: UTCDateTime
