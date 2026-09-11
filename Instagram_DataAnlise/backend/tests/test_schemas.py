@@ -116,7 +116,10 @@ def test_settings_derives_sync_url_and_parses_lists():
         apify_token="  ",
         openai_api_key="",
         instagram_username="",
+        nlp_torch_threads="",  # compose passes unset variables as empty strings
     )
+    assert settings.nlp_torch_threads is None
+    assert Settings(nlp_torch_threads="4").nlp_torch_threads == 4
     assert settings.sync_database_url == "postgresql+psycopg2://u:p@db:5432/app"
     assert settings.cors_origin_list == ["http://a.com", "http://b.com"]
     assert settings.apify_token is None

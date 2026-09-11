@@ -302,4 +302,11 @@ def test_celery_configuration_and_worker_init(monkeypatch):
     assert conf.task_default_queue == "analysis"
 
     celery_module._setup_logging()
+    monkeypatch.setattr(celery_module.settings, "nlp_torch_threads", None)
+    monkeypatch.setattr(celery_module.celery_app.conf, "worker_concurrency", 1)
     celery_module._init_worker_process()  # lexicon backend in tests: fast
+    assert celery_module.settings.nlp_torch_threads == celery_module.torch_threads_per_process(processes=1)
+
+    assert celery_module.torch_threads_per_process(cores=12, processes=2) == 6
+    assert celery_module.torch_threads_per_process(cores=4, processes=8) == 1
+    assert celery_module.torch_threads_per_process(cores=8) == 1  # Celery default: one process per core

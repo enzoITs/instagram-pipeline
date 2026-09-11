@@ -87,7 +87,7 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("instagram_username", "instagram_sessionfile", mode="before")
+    @field_validator("instagram_username", "instagram_sessionfile", "nlp_torch_threads", mode="before")
     @classmethod
     def _empty_str_is_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():

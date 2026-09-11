@@ -253,6 +253,18 @@ def test_transformers_backend_label_mapping_and_zero_shot_gating():
     assert "Ganhe dinheiro rápido" not in zs.received and "Onde compro?" not in zs.received
 
 
+def test_warm_up_runs_a_tiny_inference_only_with_models():
+    pipeline = FakeSentimentPipeline(
+        {
+            "Adorei o produto! Quanto custa?": {"label": "positive", "score": 0.9},
+            "Não gostei, veio com defeito": {"label": "negative", "score": 0.9},
+        }
+    )
+    NLPAnalyzer(Settings(nlp_intent_zero_shot=False), sentiment_pipeline=pipeline).warm_up()
+    assert len(pipeline.calls) == 1
+    lexicon_analyzer().warm_up()  # no models loaded: nothing to warm up
+
+
 def test_single_zero_shot_output_dict_is_supported():
     zs = FakeZeroShot({"Preciso muito disso": (list(nlp_service.ZERO_SHOT_LABELS)[0], 0.9)})
     pipeline = FakeSentimentPipeline({"Preciso muito disso": {"label": "neutral", "score": 0.6}})

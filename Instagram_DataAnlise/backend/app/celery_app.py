@@ -67,16 +67,32 @@ def _setup_logging(**_kwargs: Any) -> None:
     configure_logging()
 
 
+def torch_threads_per_process(cores: int | None = None, processes: int | None = None) -> int:
+    """Split CPU cores between worker processes: N processes x all-cores threads each
+    oversubscribes the CPU and makes every job slower."""
+    cores = cores or os.cpu_count() or 1
+    processes = processes or cores
+    return max(1, cores // processes)
+
+
 @signals.worker_process_init.connect
 def _init_worker_process(**_kwargs: Any) -> None:
-    """Runs in every forked child: fresh connection pools, then preload NLP models."""
+    """Runs in every forked child: fresh connection pools, then preload and warm up NLP models."""
     from app.database import reset_sync_engine
     from app.services.cache_service import get_sync_redis
 
     reset_sync_engine()
     get_sync_redis.cache_clear()
 
+    if settings.nlp_torch_threads is None:
+        settings.nlp_torch_threads = torch_threads_per_process(processes=celery_app.conf.worker_concurrency)
+
     from app.services.nlp_service import get_nlp_analyzer
 
-    get_nlp_analyzer().load()
-    logger.info("worker_process_ready", extra={"pid": os.getpid(), "nlp_backend": get_nlp_analyzer().backend})
+    analyzer = get_nlp_analyzer()
+    analyzer.load()
+    analyzer.warm_up()
+    logger.info(
+        "worker_process_ready",
+        extra={"pid": os.getpid(), "nlp_backend": analyzer.backend, "torch_threads": settings.nlp_torch_threads},
+    )
