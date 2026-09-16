@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
+from app.analyzer.schemas import AnalyzeRequest, InsightOut, MetricsOut, RecentItem, VideoOut, with_at
 from app.config import Settings
-from app.instagram_url import CANONICAL_URL_REGEX, InvalidInstagramURLError, parse_instagram_url
-from app.schemas import AnalyzeRequest, InsightOut, MetricsOut, RecentItem, VideoOut, with_at
+from app.instagram.url import CANONICAL_URL_REGEX, InvalidInstagramURLError, parse_instagram_url
 
 
 @pytest.mark.parametrize(
@@ -120,7 +120,10 @@ def test_settings_derives_sync_url_and_parses_lists():
     )
     assert settings.nlp_torch_threads is None
     assert Settings(nlp_torch_threads="4").nlp_torch_threads == 4
-    assert settings.sync_database_url == "postgresql+psycopg2://u:p@db:5432/app"
+    # psycopg 3 serves the blocking and the asyncio engine, and an old
+    # asyncpg URL from the standalone analyzer still resolves.
+    assert settings.sync_database_url == "postgresql+psycopg://u:p@db:5432/app"
+    assert settings.async_database_url == "postgresql+psycopg://u:p@db:5432/app"
     assert settings.cors_origin_list == ["http://a.com", "http://b.com"]
     assert settings.apify_token is None
     assert settings.openai_api_key is None

@@ -86,11 +86,14 @@ class CacheService:
         self.client = client
         self.ttl_seconds = ttl_seconds or get_settings().cache_ttl_seconds
 
-    async def get(self, instagram_id: str) -> dict[str, Any] | None:
+    async def get(self, instagram_id: str, *, count_stats: bool = True) -> dict[str, Any] | None:
+        """`count_stats=False` for reads the app makes on its own behalf, which
+        would otherwise inflate the hit ratio reported by /api/health."""
         try:
             raw = await self.client.get(cache_key(instagram_id))
             data = deserialize(raw)
-            await self.client.incr(STATS_HITS_KEY if data is not None else STATS_MISSES_KEY)
+            if count_stats:
+                await self.client.incr(STATS_HITS_KEY if data is not None else STATS_MISSES_KEY)
         except RedisError as exc:
             logger.warning("cache_get_failed", extra={"error": type(exc).__name__})
             return None
@@ -134,7 +137,7 @@ class CacheService:
     async def ping(self, timeout: float = 2.0) -> bool:
         try:
             return bool(await asyncio.wait_for(self.client.ping(), timeout=timeout))
-        except (RedisError, OSError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, RedisError, OSError) as exc:
             logger.warning("redis_health_check_failed", extra={"error": type(exc).__name__})
             return False
 

@@ -10,11 +10,17 @@ import pytest
 import respx
 from instaloader import exceptions as il_errors
 
+from app.analyzer.services import scraper_service
+from app.analyzer.services.mock_data import MOCK_WARNING
+from app.analyzer.services.scraper_service import (
+    InstagramScraper,
+    ScraperError,
+    parse_timestamp,
+    retry_call,
+    to_count,
+)
 from app.config import Settings
-from app.instagram_url import InvalidInstagramURLError
-from app.services import scraper_service
-from app.services.mock_data import MOCK_WARNING
-from app.services.scraper_service import InstagramScraper, ScraperError, parse_timestamp, retry_call, to_count
+from app.instagram.url import InvalidInstagramURLError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 URL = "https://www.instagram.com/reel/C8xYz12AbCd/"

@@ -6,11 +6,13 @@ import pytest
 from sqlalchemy import select, update
 
 import app.main as main_module
+import app.routers.analysis as analysis_module
+import app.routers.system as system_module
+from app.analyzer.models import Comment, Video, VideoStatus
+from app.analyzer.pipeline import run_analysis
+from app.analyzer.services.cache_service import cache_key
 from app.database import session_scope
 from app.middleware import client_ip
-from app.models import Comment, Video, VideoStatus
-from app.pipeline import run_analysis
-from app.services.cache_service import cache_key
 
 REEL = "https://www.instagram.com/reel/C8xYz12AbCd/"
 
@@ -41,7 +43,7 @@ async def test_analyze_rejects_malformed_bodies(client, payload):
 async def test_analyze_accepts_and_processes_in_background(client, monkeypatch):
     # Keep the job queued so the response can be inspected before processing.
     dispatched = []
-    monkeypatch.setattr(main_module, "_dispatch", lambda video_id, *_args: _record(dispatched, video_id))
+    monkeypatch.setattr(analysis_module, "_dispatch", lambda video_id, *_args: _record(dispatched, video_id))
 
     started = time.perf_counter()
     response = await client.post("/api/v1/analyze", json={"url": "instagram.com/reel/C8xYz12AbCd/?igsh=1"})
@@ -101,7 +103,7 @@ async def test_analyze_uses_postgres_backup_when_redis_was_flushed(client, make_
 
 async def test_analyze_reprocesses_failed_and_stale_videos(client, make_video, monkeypatch):
     dispatched = []
-    monkeypatch.setattr(main_module, "_dispatch", lambda video_id, *_args: _record(dispatched, video_id))
+    monkeypatch.setattr(analysis_module, "_dispatch", lambda video_id, *_args: _record(dispatched, video_id))
     failed = make_video(instagram_id="FAILED1", status=VideoStatus.FAILED, error_message="boom")
     stale = make_video(instagram_id="STALE01", updated_at=datetime.now(timezone.utc) - timedelta(hours=2))
 
@@ -147,7 +149,7 @@ async def test_analyze_returns_503_when_queue_is_down(client, monkeypatch, setti
 
 
 async def test_rate_limit_blocks_11th_request(client, monkeypatch):
-    monkeypatch.setattr(main_module, "_dispatch", lambda video_id, *_args: _record([], video_id))
+    monkeypatch.setattr(analysis_module, "_dispatch", lambda video_id, *_args: _record([], video_id))
     monkeypatch.setattr("app.middleware.time.time", lambda: 1_000_040.0)  # 20s into a window, deterministic
     statuses = []
     for index in range(11):
@@ -163,7 +165,7 @@ async def test_rate_limit_blocks_11th_request(client, monkeypatch):
 
 
 async def test_rate_limit_fails_open_without_redis(client, monkeypatch, fake_server):
-    monkeypatch.setattr(main_module, "_dispatch", lambda video_id, *_args: _record([], video_id))
+    monkeypatch.setattr(analysis_module, "_dispatch", lambda video_id, *_args: _record([], video_id))
     fake_server.connected = False
     response = await client.post("/api/v1/analyze", json={"url": REEL})
     assert response.status_code == 202
@@ -180,7 +182,21 @@ async def test_get_analysis_success_payload(client, make_video, pipeline_deps, a
     assert body["status"] == "success"
     data = body["data"]
     assert data["video"]["creator_username"] == "@loja.demo"
-    assert set(data["metrics"]) == {"views", "likes", "comments", "shares", "saves", "engagement_rate", "engagement_score"}
+    assert set(data["metrics"]) == {
+        "views",
+        "likes",
+        "comments",
+        "shares",
+        "saves",
+        "reach",
+        "engagement_rate",
+        "engagement_basis",
+        "engagement_score",
+    }
+    assert data["metrics"]["engagement_basis"] == "views"  # public post: no reach available
+    assert data["video"]["owned"] is False
+    assert data["tracked"] is False
+    assert len(data["history"]) == 1  # the analysis itself is the first point
     assert 0 <= data["metrics"]["engagement_score"] <= 10
     assert sum(data["sentiment"].values()) == data["processing"]["comments_analyzed"]
     assert sum(data["intents"].values()) == data["processing"]["comments_analyzed"]
@@ -229,6 +245,8 @@ async def test_get_analysis_not_found_and_invalid_id(client):
     missing = await client.get(f"/api/v1/analysis/{uuid.uuid4()}")
     assert missing.status_code == 404
     assert missing.json()["error"] == {"code": "not_found", "message": "Análise não encontrada"}
+    assert missing.json()["detail"] == "Análise não encontrada"  # FastAPI key, kept for compatibility
+    assert missing.json()["detail"] == "Análise não encontrada"  # FastAPI's usual key, kept for compatibility
     invalid = await client.get("/api/v1/analysis/not-a-uuid")
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "validation_error"
@@ -307,28 +325,27 @@ async def test_health_ok(client):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["database"] == "connected" and body["redis"] == "connected"
-    assert body["timestamp"].endswith("Z")
-    assert body["cache"] == {"hits": 0, "misses": 0, "hit_ratio": None}
+    assert body["database"] == "ok" and body["redis"] == "ok"
+    assert body["cache_hit_ratio"] is None
 
 
 async def test_health_degraded(client, monkeypatch, fake_server):
     async def db_down(timeout: float) -> bool:
         return False
 
-    monkeypatch.setattr(main_module, "check_database", db_down)
+    monkeypatch.setattr(system_module, "check_database", db_down)
     fake_server.connected = False
     response = await client.get("/health")
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
-    assert response.json()["database"] == "disconnected"
-    assert response.json()["redis"] == "disconnected"
+    assert response.json()["database"] == "error"
+    assert response.json()["redis"] == "error"
 
 
 async def test_openapi_documents_endpoints_and_400(client):
     schema = (await client.get("/openapi.json")).json()
     paths = schema["paths"]
-    assert {"/api/v1/analyze", "/api/v1/analysis/{video_id}", "/api/v1/recent", "/health"} <= set(paths)
+    assert {"/api/v1/analyze", "/api/v1/analysis/{video_id}", "/api/v1/recent", "/api/health"} <= set(paths)
     analyze_responses = paths["/api/v1/analyze"]["post"]["responses"]
     assert {"200", "202", "400", "429", "500", "503"} <= set(analyze_responses)
     assert "422" not in analyze_responses
@@ -341,7 +358,7 @@ async def test_unhandled_errors_return_error_id(client, monkeypatch):
     async def explode(*_args, **_kwargs):
         raise RuntimeError("database password=hunter2 leaked?")
 
-    monkeypatch.setattr(main_module, "load_analysis_async", explode)
+    monkeypatch.setattr(analysis_module, "load_analysis_async", explode)
     with session_scope() as session:
         video = Video(instagram_id="BOOM123", url="https://www.instagram.com/reel/BOOM123/", status=VideoStatus.COMPLETED)
         session.add(video)
@@ -357,7 +374,11 @@ async def test_unhandled_errors_return_error_id(client, monkeypatch):
 async def test_unknown_route_uses_error_envelope(client):
     response = await client.get("/api/v1/nope")
     assert response.status_code == 404
-    assert response.json() == {"status": "error", "error": {"code": "not_found", "message": "Recurso não encontrado"}}
+    assert response.json() == {
+        "status": "error",
+        "error": {"code": "not_found", "message": "Recurso não encontrado"},
+        "detail": "Recurso não encontrado",
+    }
     method = await client.put("/api/v1/recent")
     assert method.status_code == 405
     assert method.json()["error"]["code"] == "method_not_allowed"

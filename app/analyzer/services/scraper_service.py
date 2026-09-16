@@ -19,16 +19,15 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, TypeVar
+from typing import Any
 
 import httpx
 
 from app.config import Settings, get_settings
-from app.instagram_url import InstagramURL, parse_instagram_url
+from app.instagram.url import InstagramURL, parse_instagram_url
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
 MAX_COMMENT_LENGTH = 2200  # Instagram's own limit
 _TRANSIENT_HTTP_STATUS = {408, 425, 429}
@@ -59,6 +58,9 @@ class ScrapedPost:
     comments_count: int | None = None
     shares: int | None = None
     saves: int | None = None
+    # Only the owner of the post can see these two, through the Graph API.
+    reach: int | None = None
+    followers_count: int | None = None
     comments: list[ScrapedComment] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -109,7 +111,7 @@ def _first_not_none(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
 
 
-def retry_call(
+def retry_call[T](
     func: Callable[[float], T],
     *,
     attempts: int,
@@ -442,7 +444,7 @@ class InstagramScraper:
 
     # ------------------------------------------------------------------ mock
     def _scrape_mock(self, parsed: InstagramURL) -> ScrapedPost:
-        from app.services.mock_data import generate_mock_post
+        from app.analyzer.services.mock_data import generate_mock_post
 
         return generate_mock_post(parsed, max_comments=self.settings.max_comments)
 

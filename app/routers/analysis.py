@@ -1,38 +1,28 @@
-"""FastAPI application: endpoints, middleware wiring and OpenAPI metadata."""
+"""Link analysis endpoints: submit a URL, follow the job, read or drop the result."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Path, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Path, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import __version__
-from app.config import get_settings
-from app.database import check_database, dispose_async_engine, get_session
-from app.errors import APIError, register_exception_handlers
-from app.logging_config import configure_logging
-from app.middleware import RateLimitMiddleware, RequestContextMiddleware
-from app.models import Video, VideoStatus, utcnow
-from app.repository import (
+from app.analyzer.models import Video, VideoStatus, utcnow
+from app.analyzer.repository import (
     delete_cache_backup,
     get_cache_backup,
     load_analysis_async,
     recent_statement,
 )
-from app.schemas import (
+from app.analyzer.schemas import (
     STEP_LABELS,
     TOTAL_STEPS,
     AnalysisErrorResponse,
@@ -41,75 +31,35 @@ from app.schemas import (
     AnalyzeAcceptedResponse,
     AnalyzeCachedResponse,
     AnalyzeRequest,
-    CacheStats,
     DeleteResponse,
     ErrorResponse,
-    HealthResponse,
     Pagination,
     RecentItem,
     RecentResponse,
+    TrackingRequest,
+    TrackingResponse,
     with_at,
 )
-from app.services.cache_service import CacheService, create_async_redis
+from app.analyzer.services.cache_service import CacheService
+from app.config import get_settings
+from app.database import get_session
+from app.errors import APIError
+from app.security import require_session
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-API_DESCRIPTION = """
-Analisa o engajamento de Reels e Posts do Instagram: coleta métricas e comentários,
-classifica sentimento (5 categorias) e intenção (5 categorias) com NLP, extrai tópicos e
-gera 3–5 insights com IA.
-
-**Fluxo**
-1. `POST /api/v1/analyze` com a URL → `202` com `video_id` (ou `200` direto do cache).
-2. Consulte `GET /api/v1/analysis/{video_id}` a cada 2 s até `status` ser `success` ou `error`.
-
-**Erros** seguem o envelope `{"status": "error", "error": {"code", "message", "error_id?"}}`.
-`POST /analyze` é limitado a 10 requisições/minuto por IP (`429` + `Retry-After`).
-"""
-
-TAGS = [
-    {"name": "analysis", "description": "Submissão, consulta e remoção de análises."},
-    {"name": "system", "description": "Saúde do serviço."},
-]
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    configure_logging(settings)
-    app.state.redis = create_async_redis(settings)
-    app.state.cache = CacheService(app.state.redis, settings.cache_ttl_seconds)
-    logger.info(
-        "api_started",
-        extra={"version": __version__, "environment": settings.environment, "task_backend": settings.task_backend},
-    )
-    try:
-        yield
-    finally:
-        await app.state.redis.aclose()
-        await dispose_async_engine()
-        logger.info("api_stopped")
-
-
-app = FastAPI(
-    title=settings.app_name,
-    version=__version__,
-    description=API_DESCRIPTION,
-    openapi_tags=TAGS,
-    lifespan=lifespan,
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["analysis"],
+    dependencies=[Depends(require_session)],
 )
-register_exception_handlers(app)
-# Order matters: the last added middleware is the outermost one.
-app.add_middleware(RateLimitMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Request-ID"],
-    expose_headers=["X-Request-ID", "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-Error-ID"],
-)
-app.add_middleware(RequestContextMiddleware)
+
+_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorResponse, "description": "Requisição inválida"},
+    401: {"model": ErrorResponse, "description": "Sessão necessária"},
+    500: {"model": ErrorResponse, "description": "Erro interno (inclui `error_id`)"},
+}
 
 
 def get_cache(request: Request) -> CacheService:
@@ -121,27 +71,19 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _is_stale(video: Video) -> bool:
-    threshold = timedelta(seconds=settings.analysis_stale_after_seconds)
+    threshold = timedelta(seconds=get_settings().analysis_stale_after_seconds)
     return datetime.now(timezone.utc) - _as_utc(video.updated_at) > threshold
 
 
-_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
-    400: {"model": ErrorResponse, "description": "Requisição inválida"},
-    500: {"model": ErrorResponse, "description": "Erro interno (inclui `error_id`)"},
-}
-
-
-# --------------------------------------------------------------------------- endpoints
-@app.post(
-    "/api/v1/analyze",
-    tags=["analysis"],
+@router.post(
+    "/analyze",
     summary="Iniciar análise de um vídeo",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=AnalyzeAcceptedResponse,
     responses={
         200: {"model": AnalyzeCachedResponse, "description": "Resultado servido do cache (< 100 ms)"},
         **_ERROR_RESPONSES,
-        429: {"model": ErrorResponse, "description": "Limite de 10 análises/minuto por IP excedido"},
+        429: {"model": ErrorResponse, "description": "Limite de análises por minuto excedido"},
         503: {"model": ErrorResponse, "description": "Fila de processamento indisponível"},
     },
 )
@@ -151,7 +93,7 @@ async def analyze(
     session: AsyncSession = Depends(get_session),
     cache: CacheService = Depends(get_cache),
 ) -> Any:
-    """Valida a URL, consulta o cache (Redis, com backup no PostgreSQL) e, se necessário,
+    """Valida a URL, consulta o cache (Redis, com backup no banco) e, se necessário,
     enfileira a análise em background. Nunca bloqueia aguardando o processamento."""
     instagram_id = payload.instagram_id
 
@@ -180,7 +122,7 @@ async def analyze(
         video.current_step = 0
         video.error_message = None
         video.completed_at = None
-    task_id = str(uuid.uuid4()) if settings.task_backend == "celery" else None
+    task_id = str(uuid.uuid4()) if get_settings().task_backend == "celery" else None
     video.task_id = task_id
     video.updated_at = utcnow()
     try:
@@ -199,8 +141,8 @@ async def analyze(
 async def _dispatch(
     video_id: uuid.UUID, task_id: str | None, session: AsyncSession, background_tasks: BackgroundTasks
 ) -> None:
-    if settings.task_backend == "inline":
-        from app.pipeline import run_analysis_with_retries  # worker dependencies, dev mode only
+    if get_settings().task_backend == "inline":
+        from app.analyzer.pipeline import run_analysis_with_retries  # worker dependencies
 
         background_tasks.add_task(run_analysis_with_retries, video_id)
         return
@@ -224,9 +166,8 @@ async def _dispatch(
         ) from exc
 
 
-@app.get(
-    "/api/v1/analysis/{video_id}",
-    tags=["analysis"],
+@router.get(
+    "/analysis/{video_id}",
     summary="Consultar status/resultado de uma análise",
     response_model=AnalysisSuccessResponse | AnalysisProcessingResponse | AnalysisErrorResponse,
     responses={404: {"model": ErrorResponse, "description": "Análise não encontrada"}, **_ERROR_RESPONSES},
@@ -259,7 +200,7 @@ async def get_analysis(
     if video.status == VideoStatus.FAILED:
         return AnalysisErrorResponse(video_id=video.id, message=video.error_message or "Falha na análise.")
 
-    cached = await cache.get(video.instagram_id)
+    cached = await cache.get(video.instagram_id, count_stats=False)
     if cached is not None and cached.get("video_id") == str(video.id):
         return JSONResponse({"status": "success", "data": cached})
 
@@ -271,9 +212,8 @@ async def get_analysis(
     return JSONResponse({"status": "success", "data": payload})
 
 
-@app.get(
-    "/api/v1/recent",
-    tags=["analysis"],
+@router.get(
+    "/recent",
     summary="Listar análises recentes",
     response_model=RecentResponse,
     responses=_ERROR_RESPONSES,
@@ -295,9 +235,31 @@ async def recent(
     )
 
 
-@app.delete(
-    "/api/v1/analysis/{video_id}",
-    tags=["analysis"],
+@router.put(
+    "/analysis/{video_id}/tracking",
+    summary="Acompanhar (ou parar de acompanhar) a evolução deste link",
+    response_model=TrackingResponse,
+    responses={404: {"model": ErrorResponse, "description": "Análise não encontrada"}, **_ERROR_RESPONSES},
+)
+async def set_tracking(
+    payload: TrackingRequest,
+    video_id: uuid.UUID = Path(...),
+    session: AsyncSession = Depends(get_session),
+) -> TrackingResponse:
+    """Um link acompanhado recebe uma nova coleta de métricas periodicamente
+    (apenas números, sem comentários nem NLP), formando um histórico como o das
+    contas conectadas."""
+    video = await session.get(Video, video_id)
+    if video is None:
+        raise APIError(status.HTTP_404_NOT_FOUND, "not_found", "Análise não encontrada")
+    video.tracked = payload.tracked
+    await session.commit()
+    logger.info("analysis_tracking_changed", extra={"video_id": str(video_id), "tracked": payload.tracked})
+    return TrackingResponse(video_id=video.id, tracked=video.tracked)
+
+
+@router.delete(
+    "/analysis/{video_id}",
     summary="Remover uma análise",
     response_model=DeleteResponse,
     responses={404: {"model": ErrorResponse, "description": "Análise não encontrada"}, **_ERROR_RESPONSES},
@@ -311,14 +273,15 @@ async def delete_analysis(
     video = await session.get(Video, video_id)
     if video is None:
         raise APIError(status.HTTP_404_NOT_FOUND, "not_found", "Análise não encontrada")
-    instagram_id, task_id, was_processing = video.instagram_id, video.task_id, video.status == VideoStatus.PROCESSING
+    instagram_id, task_id = video.instagram_id, video.task_id
+    was_processing = video.status == VideoStatus.PROCESSING
 
     await delete_cache_backup(session, instagram_id)
     await session.execute(delete(Video).where(Video.id == video_id))
     await session.commit()
     await cache.delete(instagram_id)
 
-    if was_processing and task_id and settings.task_backend == "celery":
+    if was_processing and task_id and get_settings().task_backend == "celery":
         await _revoke(task_id)
     logger.info("analysis_deleted", extra={"video_id": str(video_id), "instagram_id": instagram_id})
     return DeleteResponse()
@@ -332,55 +295,3 @@ async def _revoke(task_id: str) -> None:
         await asyncio.wait_for(run_in_threadpool(celery_app.control.revoke, task_id), timeout=2)
     except Exception as exc:  # noqa: BLE001
         logger.warning("task_revoke_failed", extra={"task_id": task_id, "error": type(exc).__name__})
-
-
-@app.get(
-    "/health",
-    tags=["system"],
-    summary="Health check",
-    response_model=HealthResponse,
-    responses={503: {"model": HealthResponse, "description": "Dependência indisponível"}},
-)
-async def health(response: Response, cache: CacheService = Depends(get_cache)) -> HealthResponse:
-    """Verifica PostgreSQL (`SELECT 1`) e Redis (`PING`), cada um com timeout de 2 s."""
-    database_ok, redis_ok = await asyncio.gather(check_database(timeout=2.0), cache.ping(timeout=2.0))
-    healthy = database_ok and redis_ok
-    if not healthy:
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return HealthResponse(
-        status="ok" if healthy else "degraded",
-        database="connected" if database_ok else "disconnected",
-        redis="connected" if redis_ok else "disconnected",
-        timestamp=datetime.now(timezone.utc),
-        version=__version__,
-        cache=CacheStats(**await cache.stats()) if redis_ok else None,
-    )
-
-
-# --------------------------------------------------------------------------- OpenAPI
-def custom_openapi() -> dict[str, Any]:
-    """Document request-validation errors as 400 (what the API returns), not FastAPI's 422."""
-    if app.openapi_schema:
-        return app.openapi_schema
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-        tags=app.openapi_tags,
-    )
-    for path_item in schema.get("paths", {}).values():
-        for operation in path_item.values():
-            responses = operation.get("responses", {})
-            if responses.pop("422", None) is not None and "400" not in responses:
-                responses["400"] = {
-                    "description": "Requisição inválida",
-                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
-                }
-    for unused in ("HTTPValidationError", "ValidationError"):
-        schema.get("components", {}).get("schemas", {}).pop(unused, None)
-    app.openapi_schema = schema
-    return schema
-
-
-app.openapi = custom_openapi  # type: ignore[method-assign]

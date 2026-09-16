@@ -1,3 +1,1 @@
-"""Instagram Engagement Analyzer backend."""
-
-__version__ = "1.0.0"
+"""Link analysis: turning a public Instagram URL into engagement insight."""

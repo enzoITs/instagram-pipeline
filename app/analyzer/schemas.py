@@ -8,8 +8,8 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
-from app.instagram_url import InvalidInstagramURLError, parse_instagram_url
-from app.models import InsightType, IntentCategory, SentimentLabel, VideoStatus
+from app.analyzer.models import InsightType, IntentCategory, SentimentLabel, VideoStatus
+from app.instagram.url import InvalidInstagramURLError, parse_instagram_url
 
 TOTAL_STEPS = 8
 STEP_LABELS: dict[int, str] = {
@@ -71,6 +71,9 @@ class VideoOut(APIModel):
     instagram_id: str
     url: str
     media_type: str | None = None
+    owned: bool = Field(
+        default=False, description="Post de uma conta conectada: métricas vêm da API oficial."
+    )
     creator_username: str | None = Field(default=None, examples=["@brand"])
     caption: str | None = None
     thumbnail_url: str | None = None
@@ -82,10 +85,28 @@ class MetricsOut(APIModel):
     views: int | None = Field(default=None, examples=[250000])
     likes: int | None = Field(default=None, examples=[18500])
     comments: int | None = Field(default=None, examples=[1230])
-    shares: int | None = Field(default=None, description="Indisponível publicamente (null).")
-    saves: int | None = Field(default=None, description="Indisponível publicamente (null).")
+    shares: int | None = Field(default=None, description="Só visível ao dono do post (null).")
+    saves: int | None = Field(default=None, description="Só visível ao dono do post (null).")
+    reach: int | None = Field(default=None, description="Só visível ao dono do post (null).")
     engagement_rate: float | None = Field(default=None, description="Percentual (%).", examples=[8.67])
+    engagement_basis: Literal["reach", "views", "followers"] | None = Field(
+        default=None, description="Denominador usado na taxa."
+    )
     engagement_score: float | None = Field(default=None, ge=0, le=10, examples=[8.9])
+
+
+class MetricPointOut(APIModel):
+    """One point of a tracked link's metric history."""
+
+    collected_at: UTCDateTime
+    views: int | None = None
+    likes: int | None = None
+    comments: int | None = None
+    shares: int | None = None
+    saves: int | None = None
+    reach: int | None = None
+    engagement_rate: float | None = None
+    engagement_basis: str | None = None
 
 
 class SentimentDistribution(APIModel):
@@ -144,10 +165,24 @@ class ProcessingInfo(APIModel):
     completed_at: UTCDateTime | None = None
 
 
+class TrackingRequest(BaseModel):
+    tracked: bool = Field(description="true acompanha a evolução das métricas deste link.")
+
+
+class TrackingResponse(APIModel):
+    status: Literal["success"] = "success"
+    video_id: UUID
+    tracked: bool
+
+
 class AnalysisData(APIModel):
     video_id: UUID
     video: VideoOut
     metrics: MetricsOut
+    tracked: bool = False
+    history: list[MetricPointOut] = Field(
+        default_factory=list, description="Snapshots de métricas, do mais antigo ao mais recente."
+    )
     sentiment: SentimentDistribution
     intents: IntentDistribution
     top_topics: list[TopicOut]

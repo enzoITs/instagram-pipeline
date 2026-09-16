@@ -31,8 +31,8 @@ from typing import Any
 from nltk.tokenize import TweetTokenizer
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from app.analyzer.models import IntentCategory, SentimentLabel
 from app.config import Settings, get_settings
-from app.models import IntentCategory, SentimentLabel
 
 logger = logging.getLogger(__name__)
 
@@ -80,30 +80,15 @@ def stopwords() -> frozenset[str]:
 # --------------------------------------------------------------------------- lexicons
 POSITIVE_TERMS = frozenset(
     fold(word)
-    for word in """
-    amei adorei amo incrível incríveis perfeito perfeita maravilhoso maravilhosa maravilha lindo linda
-    lindos lindas top sensacional parabéns melhor melhores ótimo ótima excelente show arrasou recomendo
-    fantástico fantástica espetacular gostei apaixonada apaixonado sucesso impecável obrigada obrigado
-    feliz fofo fofa brabo braba perfeição genial massa lindeza love loved amazing perfect beautiful best
-    great awesome nice good excellent wonderful
-    """.split()
+    for word in ["amei", "adorei", "amo", "incrível", "incríveis", "perfeito", "perfeita", "maravilhoso", "maravilhosa", "maravilha", "lindo", "linda", "lindos", "lindas", "top", "sensacional", "parabéns", "melhor", "melhores", "ótimo", "ótima", "excelente", "show", "arrasou", "recomendo", "fantástico", "fantástica", "espetacular", "gostei", "apaixonada", "apaixonado", "sucesso", "impecável", "obrigada", "obrigado", "feliz", "fofo", "fofa", "brabo", "braba", "perfeição", "genial", "massa", "lindeza", "love", "loved", "amazing", "perfect", "beautiful", "best", "great", "awesome", "nice", "good", "excellent", "wonderful"]
 )
 NEGATIVE_TERMS = frozenset(
     fold(word)
-    for word in """
-    péssimo péssima horrível horrorosa horroroso ruim lixo odeio odiei decepção decepcionado decepcionada
-    golpe fraude enganosa enganoso enganação defeito pior piores ridículo ridícula nojo nojento vergonha
-    chato chata mentira mentiroso fake triste raiva porcaria terrível quebrou caro caríssimo
-    bad worst hate terrible awful scam ugly boring disappointed disappointing
-    """.split()
+    for word in ["péssimo", "péssima", "horrível", "horrorosa", "horroroso", "ruim", "lixo", "odeio", "odiei", "decepção", "decepcionado", "decepcionada", "golpe", "fraude", "enganosa", "enganoso", "enganação", "defeito", "pior", "piores", "ridículo", "ridícula", "nojo", "nojento", "vergonha", "chato", "chata", "mentira", "mentiroso", "fake", "triste", "raiva", "porcaria", "terrível", "quebrou", "caro", "caríssimo", "bad", "worst", "hate", "terrible", "awful", "scam", "ugly", "boring", "disappointed", "disappointing"]
 )
 INSULT_TERMS = frozenset(
     fold(word)
-    for word in """
-    lixo ridículo ridícula golpe golpista fraude nojo nojento vergonha idiota burro burra palhaço
-    palhaçada otário otária lixoso bosta merda porcaria fake mentiroso cringe incompetente incompetentes
-    scam trash stupid idiot
-    """.split()
+    for word in ["lixo", "ridículo", "ridícula", "golpe", "golpista", "fraude", "nojo", "nojento", "vergonha", "idiota", "burro", "burra", "palhaço", "palhaçada", "otário", "otária", "lixoso", "bosta", "merda", "porcaria", "fake", "mentiroso", "cringe", "incompetente", "incompetentes", "scam", "trash", "stupid", "idiot"]
 )
 NEGATIVE_PHRASES = tuple(
     fold(phrase)
@@ -345,7 +330,7 @@ class NLPAnalyzer:
         keywords = self.extract_keywords(token_docs)
         analyses = [
             CommentAnalysis(sentiment=label, confidence=round(conf, 4), intent_category=intent, key_phrases=phrases)
-            for (label, conf), intent, phrases in zip(sentiments, intents, keywords)
+            for (label, conf), intent, phrases in zip(sentiments, intents, keywords, strict=False)
         ]
         topics = self.extract_topics(token_docs, analyses)
         durations["keywords_topics"] = time.perf_counter() - started
@@ -372,7 +357,7 @@ class NLPAnalyzer:
         """Return (label, confidence) per text using the 5-label scheme."""
         base = self._model_sentiment(texts, warnings)
         results: list[tuple[SentimentLabel, float]] = []
-        for text, (label, confidence) in zip(texts, base):
+        for text, (label, confidence) in zip(texts, base, strict=False):
             folded = fold(text)
             if is_spam(folded):
                 results.append((SentimentLabel.SPAM, 0.9))
@@ -394,7 +379,7 @@ class NLPAnalyzer:
     ) -> list[IntentCategory]:
         intents: list[IntentCategory | None] = []
         undecided: list[int] = []
-        for index, (text, (label, confidence)) in enumerate(zip(texts, sentiments)):
+        for index, (text, (label, confidence)) in enumerate(zip(texts, sentiments, strict=False)):
             intent = rule_based_intent(text, label, confidence)
             intents.append(intent)
             if intent is None:
@@ -431,7 +416,7 @@ class NLPAnalyzer:
 
     @staticmethod
     def ngrams(tokens: Sequence[str]) -> list[str]:
-        return list(tokens) + [f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a != b]
+        return list(tokens) + [f"{a} {b}" for a, b in zip(tokens, tokens[1:], strict=False) if a != b]
 
     def extract_keywords(self, token_docs: Sequence[Sequence[str]], top_k: int = 3) -> list[list[str]]:
         """Top TF-IDF n-grams per comment (bigrams absorb their own unigrams)."""
@@ -445,7 +430,7 @@ class NLPAnalyzer:
         for row_index in range(matrix.shape[0]):
             start, end = matrix.indptr[row_index], matrix.indptr[row_index + 1]
             ranked = sorted(
-                zip(matrix.indices[start:end], matrix.data[start:end]),
+                zip(matrix.indices[start:end], matrix.data[start:end], strict=False),
                 key=lambda item: (-item[1], features[item[0]]),
             )
             chosen: list[str] = []
@@ -575,7 +560,7 @@ class NLPAnalyzer:
         if isinstance(outputs, dict):
             outputs = [outputs]
         predictions: dict[int, tuple[IntentCategory, float]] = {}
-        for index, output in zip(indices, outputs):
+        for index, output in zip(indices, outputs, strict=False):
             if output["labels"] and output["labels"][0] in ZERO_SHOT_LABELS:
                 predictions[index] = (ZERO_SHOT_LABELS[output["labels"][0]], float(output["scores"][0]))
         return predictions

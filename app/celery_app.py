@@ -1,7 +1,14 @@
-"""Celery application (Redis broker + result backend).
+"""Celery application: two queues, one beat schedule (Redis broker and backend).
 
-Start a worker with:
-    celery -A app.celery_app worker --loglevel=info
+    analysis   - one job per link analysis; the worker image carries the NLP
+                 models, so these processes preload them at start-up.
+    collection - Graph API collection, token refresh and maintenance jobs.
+                 Run this worker with `--concurrency 1`: the Meta call budget
+                 is enforced per process, so extra processes would multiply it.
+
+Start them with:
+    celery -A app.celery_app worker -Q analysis --loglevel=info
+    celery -A app.celery_app worker -Q collection --concurrency 1 -B --loglevel=info
 """
 
 from __future__ import annotations
@@ -18,12 +25,13 @@ from app.logging_config import configure_logging
 logger = logging.getLogger(__name__)
 
 TASK_NAME = "app.tasks.process_video_analysis"
-QUEUE_NAME = "analysis"
+ANALYSIS_QUEUE = "analysis"
+COLLECTION_QUEUE = "collection"
 
 settings = get_settings()
 
 celery_app = Celery(
-    "instagram_analyzer",
+    "instagram_pipeline",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
     include=["app.tasks"],
@@ -37,7 +45,15 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
-    task_default_queue=QUEUE_NAME,
+    task_default_queue=ANALYSIS_QUEUE,
+    task_routes={
+        TASK_NAME: {"queue": ANALYSIS_QUEUE},
+        "app.tasks.collect_account": {"queue": COLLECTION_QUEUE},
+        "app.tasks.collect_all_accounts": {"queue": COLLECTION_QUEUE},
+        "app.tasks.refresh_tokens": {"queue": COLLECTION_QUEUE},
+        "app.tasks.sweep_stale_runs": {"queue": COLLECTION_QUEUE},
+        "app.tasks.refresh_tracked_videos": {"queue": COLLECTION_QUEUE},
+    },
     # Reliability: ack only after completion and re-queue if a worker dies mid-task.
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -45,7 +61,7 @@ celery_app.conf.update(
     task_soft_time_limit=settings.task_soft_time_limit_seconds,
     task_time_limit=settings.task_time_limit_seconds,
     # Must exceed the hard time limit, otherwise Redis re-delivers long-running tasks.
-    broker_transport_options={"visibility_timeout": 3600},
+    broker_transport_options={"visibility_timeout": settings.task_time_limit_seconds * 8},
     task_track_started=True,
     result_expires=86_400,
     broker_connection_retry_on_startup=True,
@@ -55,10 +71,23 @@ celery_app.conf.update(
     # Events for monitoring tools (celery events / Flower).
     worker_send_task_events=True,
     task_send_sent_event=True,
-    # Default = one process per CPU core. Each process loads the NLP models, so
-    # memory-constrained hosts should cap it via CELERY_CONCURRENCY.
+    # Default = one process per CPU core. Each analysis process loads the NLP
+    # models, so memory-constrained hosts should cap it via CELERY_CONCURRENCY.
     worker_concurrency=int(_concurrency) if _concurrency else None,
 )
+
+
+def configure_beat(app: Celery | None = None) -> dict[str, Any]:
+    """Install the periodic schedule (collection, token refresh, maintenance)."""
+    from app.scheduler import beat_schedule
+
+    app = app or celery_app
+    schedule = beat_schedule(get_settings())
+    app.conf.beat_schedule = schedule
+    return schedule
+
+
+configure_beat(celery_app)
 
 
 @signals.setup_logging.connect
@@ -77,22 +106,32 @@ def torch_threads_per_process(cores: int | None = None, processes: int | None = 
 
 @signals.worker_process_init.connect
 def _init_worker_process(**_kwargs: Any) -> None:
-    """Runs in every forked child: fresh connection pools, then preload and warm up NLP models."""
+    """Runs in every forked child: fresh connection pools, then (for the analysis
+    queue) preload and warm up the NLP models."""
+    from app.analyzer.services.cache_service import get_sync_redis
     from app.database import reset_sync_engine
-    from app.services.cache_service import get_sync_redis
 
     reset_sync_engine()
     get_sync_redis.cache_clear()
 
+    if not settings.worker_preload_nlp:
+        logger.info("worker_process_ready", extra={"pid": os.getpid(), "nlp_preloaded": False})
+        return
+
     if settings.nlp_torch_threads is None:
         settings.nlp_torch_threads = torch_threads_per_process(processes=celery_app.conf.worker_concurrency)
 
-    from app.services.nlp_service import get_nlp_analyzer
+    from app.analyzer.services.nlp_service import get_nlp_analyzer
 
     analyzer = get_nlp_analyzer()
     analyzer.load()
     analyzer.warm_up()
     logger.info(
         "worker_process_ready",
-        extra={"pid": os.getpid(), "nlp_backend": analyzer.backend, "torch_threads": settings.nlp_torch_threads},
+        extra={
+            "pid": os.getpid(),
+            "nlp_preloaded": True,
+            "nlp_backend": analyzer.backend,
+            "torch_threads": settings.nlp_torch_threads,
+        },
     )

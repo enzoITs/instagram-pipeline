@@ -4,10 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import Settings
-from app.models import IntentCategory, SentimentLabel
-from app.services import nlp_service
-from app.services.nlp_service import (
+from app.analyzer.models import IntentCategory, SentimentLabel
+from app.analyzer.services import nlp_service
+from app.analyzer.services.nlp_service import (
     CommentAnalysis,
     NLPAnalyzer,
     doubt_strength,
@@ -17,6 +16,7 @@ from app.services.nlp_service import (
     lexicon_sentiment,
     rule_based_intent,
 )
+from app.config import Settings
 
 POS, NEG, NEU, DOUBT, SPAM = (
     SentimentLabel.POSITIVE,
@@ -237,7 +237,7 @@ def test_transformers_backend_label_mapping_and_zero_shot_gating():
     assert analyzer.backend == "transformers"
 
     result = analyzer.analyze(list(sentiments))
-    by_text = dict(zip(sentiments, result.comments))
+    by_text = dict(zip(sentiments, result.comments, strict=False))
     assert pipeline.calls[0]["batch_size"] == 16 and pipeline.calls[0]["truncation"] is True
     assert by_text["Preciso muito disso"].intent_category is IntentCategory.POTENTIAL_BUYER
     assert by_text["Amei o produto"].sentiment is POS
@@ -344,5 +344,5 @@ def test_real_models_quality_and_speed():
     started = time.perf_counter()
     result = analyzer.analyze(texts)
     assert time.perf_counter() - started < 10  # requirement: 100 comments < 10 s
-    for text, analysis in zip(texts, result.comments):
+    for text, analysis in zip(texts, result.comments, strict=False):
         assert (analysis.sentiment, analysis.intent_category) == samples[text], text

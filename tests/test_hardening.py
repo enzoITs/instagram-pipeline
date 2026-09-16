@@ -20,7 +20,7 @@ from app.instagram.client import InstagramClient, get_shared_rate_limiter
 from app.models import Account, Media, MetricSnapshot
 from app.services.analytics import escape_like
 from app.services.collector import collect_account
-from app.services.jobs_runtime import sweep_orphaned_runs
+from app.services.jobs_runtime import sweep_stale_runs
 
 GRAPH = "https://graph.instagram.com/v23.0"
 
@@ -269,17 +269,32 @@ class TestMediaOwnership:
 
 class TestOrphanedRuns:
     def test_a_run_left_running_by_a_crash_is_closed(self, db, account) -> None:
+        from datetime import datetime, timedelta, timezone
+
         from app.models import CollectionRun, RunStatus
 
-        db.add(CollectionRun(account_id=account.id, status=RunStatus.RUNNING))
+        old = datetime.now(timezone.utc) - timedelta(hours=6)
+        db.add(CollectionRun(account_id=account.id, status=RunStatus.RUNNING, started_at=old))
         db.commit()
 
-        assert sweep_orphaned_runs() == 1
+        assert sweep_stale_runs() == 1
 
         db.expire_all()
         run = db.query(CollectionRun).one()
         assert run.status == RunStatus.FAILED
         assert run.finished_at is not None
+
+    def test_a_collection_that_just_started_is_left_alone(self, db, account) -> None:
+        """Workers run in their own processes now: a fresh `running` row almost
+        always belongs to a collection that is very much alive."""
+        from app.models import CollectionRun, RunStatus
+
+        db.add(CollectionRun(account_id=account.id, status=RunStatus.RUNNING))
+        db.commit()
+
+        assert sweep_stale_runs() == 0
+        db.expire_all()
+        assert db.query(CollectionRun).one().status == RunStatus.RUNNING
 
 
 class TestSecurityHeaders:

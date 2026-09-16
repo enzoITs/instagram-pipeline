@@ -297,7 +297,9 @@ def _exchange_code_facebook(
             ig_user_id=str(ig_account["id"]),
             access_token=page_token,
             # Page tokens derived from a long-lived user token do not expire.
-            expires_at=expires_at,
+            # Storing the user token's expiry here made the refresh job "renew"
+            # the same token every 12 hours, forever, without anything changing.
+            expires_at=None if page.get("access_token") else expires_at,
             username=profile.get("username") or ig_account.get("username"),
             name=profile.get("name"),
             account_type=profile.get("account_type"),

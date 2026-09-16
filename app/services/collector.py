@@ -118,14 +118,22 @@ def collect_account(
             )
 
         try:
+            # Meta can return the same post twice across pages; a duplicate would
+            # hit the (media_id, collected_at) unique index and roll back the run.
+            seen_ids: set[str] = set()
             for item in items:
+                ig_media_id = str(item.get("id") or "")
+                if ig_media_id in seen_ids:
+                    logger.info("Skipping duplicate media %s in this collection.", ig_media_id)
+                    continue
+                seen_ids.add(ig_media_id)
                 media_seen += 1
                 media, created = _upsert_media(db, account, item)
                 if created:
                     media_created += 1
 
                 try:
-                    insights, warning = _fetch_insights(client, token, item)
+                    insights, warning = fetch_media_insights(client, token, item)
                 except GraphAPIError as exc:
                     if exc.is_token_error:
                         raise
@@ -136,6 +144,7 @@ def collect_account(
 
                 metrics = _merge_metrics(item, insights)
                 rate, basis = compute_engagement_rate(metrics, account.followers_count)
+                denominator = _denominator(metrics, basis, account.followers_count)
 
                 snapshot = MetricSnapshot(
                     media_id=media.id,
@@ -151,6 +160,7 @@ def collect_account(
                     follows=metrics.get("follows"),
                     engagement_rate=rate,
                     engagement_basis=basis,
+                    engagement_denominator=denominator,
                     raw={"media": item, "insights": insights},
                 )
                 db.add(snapshot)
@@ -274,14 +284,14 @@ def _upsert_media(db: Session, account: Account, item: dict[str, Any]) -> tuple[
     media.permalink = item.get("permalink") or media.permalink
     media.media_url = item.get("media_url") or media.media_url
     media.thumbnail_url = item.get("thumbnail_url") or media.thumbnail_url
-    media.timestamp = _parse_timestamp(item.get("timestamp")) or media.timestamp
+    media.timestamp = parse_graph_timestamp(item.get("timestamp")) or media.timestamp
 
     db.add(media)
     db.flush()  # assigns media.id for new rows
     return media, created
 
 
-def _fetch_insights(
+def fetch_media_insights(
     client: InstagramClient, token: str, item: dict[str, Any]
 ) -> tuple[dict[str, int], str | None]:
     """Fetch insights, dropping metrics this media type does not support.
@@ -338,6 +348,23 @@ def _fetch_insights(
     return {}, "insights were abandoned after repeated unsupported-metric errors"
 
 
+def _denominator(
+    metrics: dict[str, int | None], basis: str | None, followers_count: int | None
+) -> int | None:
+    """The audience number the rate was divided by, stored next to the rate.
+
+    Averaging percentages computed over different audiences overweights small
+    posts; keeping the denominator lets the dashboard divide sums by sums.
+    """
+    if basis == "reach":
+        return metrics.get("reach")
+    if basis == "views":
+        return metrics.get("views")
+    if basis == "followers":
+        return followers_count
+    return None
+
+
 def _merge_metrics(item: dict[str, Any], insights: dict[str, int]) -> dict[str, int | None]:
     """Combine node counters with insight values into one flat dict."""
     metrics: dict[str, int | None] = dict(insights)
@@ -348,7 +375,7 @@ def _merge_metrics(item: dict[str, Any], insights: dict[str, int]) -> dict[str, 
     return metrics
 
 
-def _parse_timestamp(value: Any) -> datetime | None:
+def parse_graph_timestamp(value: Any) -> datetime | None:
     """Parse Meta's ISO-8601 timestamps (``2025-01-31T12:00:00+0000``)."""
     if not isinstance(value, str) or not value:
         return None

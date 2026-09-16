@@ -18,18 +18,29 @@ PROTECTED = [
     ("get", "/api/runs"),
     ("get", "/api/media/1"),
     ("get", "/auth/login-url"),
+    # The link analysis spends Apify/OpenAI credits and can delete results,
+    # so it sits behind the same login.
+    ("get", "/api/v1/recent"),
+    ("post", "/api/v1/analyze"),
+    ("delete", "/api/v1/analysis/00000000-0000-0000-0000-000000000000"),
 ]
 
 
 @pytest.fixture()
-def secured(db):
+def secured(db, fake_server):
     """A client for an app whose ADMIN_PASSWORD is set."""
+    import fakeredis
+
+    from app.analyzer.services.cache_service import CacheService
     from app.main import app
 
     settings = get_settings()
     settings.admin_password = "correct horse battery staple"
     try:
         with TestClient(app, base_url="https://testserver") as client:
+            redis_client = fakeredis.aioredis.FakeRedis(server=fake_server, decode_responses=True)
+            app.state.redis = redis_client
+            app.state.cache = CacheService(redis_client, settings.cache_ttl_seconds)
             yield client
     finally:
         settings.admin_password = ""

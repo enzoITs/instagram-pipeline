@@ -52,7 +52,9 @@ def error_body(
         error["error_id"] = error_id
     if details:
         error["details"] = details
-    return {"status": "error", "error": error}
+    # `detail` repeats the message under FastAPI's default key, so clients (and
+    # the older half of this API) that read it keep working.
+    return {"status": "error", "error": error, "detail": message}
 
 
 async def api_error_handler(_request: Request, exc: Exception) -> JSONResponse:

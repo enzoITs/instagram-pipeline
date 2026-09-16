@@ -155,8 +155,11 @@ class MetricSnapshot(Base):
     follows: Mapped[int | None] = mapped_column(Integer)
 
     engagement_rate: Mapped[float | None] = mapped_column(Float)
-    # Denominator actually used for the engagement rate ("reach" or "followers").
+    # Denominator actually used for the rate: "reach", "views" or "followers".
     engagement_basis: Mapped[str | None] = mapped_column(String(16))
+    # The denominator's value, so averages can be weighted (sum of interactions
+    # over sum of audience) instead of averaging percentages of different sizes.
+    engagement_denominator: Mapped[int | None] = mapped_column(Integer)
 
     # Untouched API payload, so nothing Meta returns is ever lost.
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -215,3 +218,7 @@ class JobLock(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
         return f"<JobLock {self.job_id} by {self.owner}>"
+
+# Link-analysis models share the declarative base; importing them here
+# registers every table on Base.metadata for Alembic and init_db.
+from app.analyzer import models as _analyzer_models  # noqa: E402, F401

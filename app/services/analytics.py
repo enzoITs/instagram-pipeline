@@ -6,13 +6,58 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 
 from app.models import Account, Media, MetricSnapshot
 
 # Metric columns that are summed or averaged across snapshots.
 _SUMMABLE = ("likes", "comments", "saved", "shares", "reach", "views")
+
+# Interactions that make up the numerator of the engagement rate.
+_INTERACTIONS = ("likes", "comments", "saved", "shares")
+
+
+def _denominator_sum() -> Any:
+    """Audience of a group of snapshots.
+
+    Rows collected before `engagement_denominator` existed keep their reach or
+    view count, so history written by an older version still averages correctly.
+    """
+    fallback = case(
+        (MetricSnapshot.engagement_basis == "reach", MetricSnapshot.reach),
+        (MetricSnapshot.engagement_basis == "views", MetricSnapshot.views),
+        else_=None,
+    )
+    return func.sum(func.coalesce(MetricSnapshot.engagement_denominator, fallback))
+
+
+def _interactions_sum() -> Any:
+    """SQL sum of the four interaction counters, treating NULL as 0."""
+    total: Any = func.coalesce(getattr(MetricSnapshot, _INTERACTIONS[0]), 0)
+    for name in _INTERACTIONS[1:]:
+        total = total + func.coalesce(getattr(MetricSnapshot, name), 0)
+    return func.sum(total)
+
+
+def weighted_rate(rows: Sequence[Sequence[Any]]) -> tuple[float | None, str | None]:
+    """Engagement rate of a group of posts: sum of interactions over sum of audience.
+
+    Averaging each post's percentage would give a post seen by 50 people the
+    same weight as one seen by 50 000, and would silently mix rates measured
+    against reach with rates measured against followers. Rows are
+    ``(basis, interactions, audience, snapshots)``; the basis covering the most
+    posts wins and is reported next to the number.
+    """
+    best: tuple[str, float, float, int] | None = None
+    for basis, interactions, audience, count in rows:
+        if not basis or not audience or float(audience) <= 0 or interactions is None:
+            continue
+        if best is None or int(count or 0) > best[3]:
+            best = (str(basis), float(interactions), float(audience), int(count or 0))
+    if best is None:
+        return None, None
+    return round(best[1] / best[2] * 100, 2), best[0]
 
 
 def latest_snapshot_subquery():
@@ -58,7 +103,6 @@ def account_summary(db: Session, account: Account) -> dict[str, Any]:
         select(
             func.count(MetricSnapshot.id),
             *[func.sum(getattr(MetricSnapshot, name)) for name in _SUMMABLE],
-            func.avg(MetricSnapshot.engagement_rate),
         )
         .select_from(MetricSnapshot)
         .join(Media, Media.id == MetricSnapshot.media_id)
@@ -70,7 +114,26 @@ def account_summary(db: Session, account: Account) -> dict[str, Any]:
         .where(Media.account_id == account.id)
     )
     row = db.execute(stmt).one()
-    counted, likes, comments, saved, shares, reach, views, avg_rate = row
+    counted, likes, comments, saved, shares, reach, views = row
+
+    rate_rows = db.execute(
+        select(
+            MetricSnapshot.engagement_basis,
+            _interactions_sum(),
+            _denominator_sum(),
+            func.count(MetricSnapshot.id),
+        )
+        .select_from(MetricSnapshot)
+        .join(Media, Media.id == MetricSnapshot.media_id)
+        .join(
+            newest,
+            (MetricSnapshot.media_id == newest.c.media_id)
+            & (MetricSnapshot.collected_at == newest.c.max_collected_at),
+        )
+        .where(Media.account_id == account.id)
+        .group_by(MetricSnapshot.engagement_basis)
+    ).all()
+    avg_rate, basis = weighted_rate(rate_rows)
 
     tracked_media = db.scalar(
         select(func.count(Media.id)).where(Media.account_id == account.id)
@@ -97,7 +160,8 @@ def account_summary(db: Session, account: Account) -> dict[str, Any]:
         "total_shares": int(shares or 0),
         "total_reach": int(reach or 0),
         "total_views": int(views or 0),
-        "average_engagement_rate": round(float(avg_rate), 2) if avg_rate is not None else None,
+        "average_engagement_rate": avg_rate,
+        "engagement_basis": basis,
         "first_collected_at": first_collected,
         "last_collected_at": last_collected,
         "_counted_media": counted,
@@ -117,7 +181,6 @@ def engagement_timeseries(
                 func.sum(getattr(MetricSnapshot, name)).label(name)
                 for name in _SUMMABLE
             ],
-            func.avg(MetricSnapshot.engagement_rate).label("engagement_rate"),
         )
         .select_from(MetricSnapshot)
         .join(Media, Media.id == MetricSnapshot.media_id)
@@ -125,15 +188,32 @@ def engagement_timeseries(
         .group_by(MetricSnapshot.collected_at)
         .order_by(MetricSnapshot.collected_at)
     )
+    rates: dict[Any, list[tuple[Any, ...]]] = {}
+    for basis_row in db.execute(
+        select(
+            MetricSnapshot.collected_at,
+            MetricSnapshot.engagement_basis,
+            _interactions_sum(),
+            _denominator_sum(),
+            func.count(MetricSnapshot.id),
+        )
+        .select_from(MetricSnapshot)
+        .join(Media, Media.id == MetricSnapshot.media_id)
+        .where(Media.account_id == account.id, MetricSnapshot.collected_at >= since)
+        .group_by(MetricSnapshot.collected_at, MetricSnapshot.engagement_basis)
+    ):
+        rates.setdefault(basis_row[0], []).append(tuple(basis_row[1:]))
+
     points: list[dict[str, Any]] = []
     for row in db.execute(stmt):
         mapping = row._mapping
-        rate = mapping["engagement_rate"]
+        rate, basis = weighted_rate(rates.get(mapping["collected_at"], []))
         points.append(
             {
                 "collected_at": mapping["collected_at"],
                 "media_count": int(mapping["media_count"] or 0),
-                "engagement_rate": round(float(rate), 2) if rate is not None else None,
+                "engagement_rate": rate,
+                "engagement_basis": basis,
                 **{name: int(mapping[name] or 0) for name in _SUMMABLE},
             }
         )
@@ -143,11 +223,11 @@ def engagement_timeseries(
 def media_type_breakdown(db: Session, account: Account) -> list[dict[str, Any]]:
     """Average engagement per media product type (FEED vs REELS)."""
     newest = latest_snapshot_subquery()
+    product_type = func.coalesce(Media.media_product_type, "UNKNOWN")
     stmt = (
         select(
-            func.coalesce(Media.media_product_type, "UNKNOWN").label("media_product_type"),
+            product_type.label("media_product_type"),
             func.count(MetricSnapshot.id).label("media_count"),
-            func.avg(MetricSnapshot.engagement_rate).label("average_engagement_rate"),
             func.sum(MetricSnapshot.reach).label("total_reach"),
             func.sum(MetricSnapshot.views).label("total_views"),
         )
@@ -159,18 +239,41 @@ def media_type_breakdown(db: Session, account: Account) -> list[dict[str, Any]]:
             & (MetricSnapshot.collected_at == newest.c.max_collected_at),
         )
         .where(Media.account_id == account.id)
-        .group_by(func.coalesce(Media.media_product_type, "UNKNOWN"))
+        .group_by(product_type)
         .order_by(func.count(MetricSnapshot.id).desc())
     )
+
+    rates: dict[str, list[tuple[Any, ...]]] = {}
+    for row in db.execute(
+        select(
+            product_type,
+            MetricSnapshot.engagement_basis,
+            _interactions_sum(),
+            _denominator_sum(),
+            func.count(MetricSnapshot.id),
+        )
+        .select_from(MetricSnapshot)
+        .join(Media, Media.id == MetricSnapshot.media_id)
+        .join(
+            newest,
+            (MetricSnapshot.media_id == newest.c.media_id)
+            & (MetricSnapshot.collected_at == newest.c.max_collected_at),
+        )
+        .where(Media.account_id == account.id)
+        .group_by(product_type, MetricSnapshot.engagement_basis)
+    ):
+        rates.setdefault(str(row[0]), []).append(tuple(row[1:]))
+
     result: list[dict[str, Any]] = []
     for row in db.execute(stmt):
         mapping = row._mapping
-        rate = mapping["average_engagement_rate"]
+        rate, basis = weighted_rate(rates.get(str(mapping["media_product_type"]), []))
         result.append(
             {
                 "media_product_type": mapping["media_product_type"],
                 "media_count": int(mapping["media_count"] or 0),
-                "average_engagement_rate": round(float(rate), 2) if rate is not None else None,
+                "average_engagement_rate": rate,
+                "engagement_basis": basis,
                 "total_reach": int(mapping["total_reach"] or 0),
                 "total_views": int(mapping["total_views"] or 0),
             }

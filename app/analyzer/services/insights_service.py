@@ -16,8 +16,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from app.analyzer.models import InsightType
 from app.config import Settings, get_settings
-from app.models import InsightType
 
 logger = logging.getLogger(__name__)
 

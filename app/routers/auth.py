@@ -149,8 +149,12 @@ def callback(
     account.name = connected.name or account.name
     account.account_type = connected.account_type or account.account_type
     account.profile_picture_url = connected.profile_picture_url or account.profile_picture_url
-    account.followers_count = connected.followers_count
-    account.media_count = connected.media_count
+    # A lean profile response (Meta drops fields it cannot serve) must not wipe
+    # the follower history already collected for this account.
+    if connected.followers_count is not None:
+        account.followers_count = connected.followers_count
+    if connected.media_count is not None:
+        account.media_count = connected.media_count
     account.facebook_page_id = connected.facebook_page_id or account.facebook_page_id
     account.is_active = True
 

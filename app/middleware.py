@@ -99,17 +99,24 @@ class RateLimitMiddleware:
 
     window_seconds = 60
 
-    def __init__(self, app: ASGIApp, limited_routes: set[tuple[str, str]] | None = None) -> None:
+    def __init__(self, app: ASGIApp, limited_routes: dict[tuple[str, str], str] | None = None) -> None:
         self.app = app
-        self.limited_routes = limited_routes or {("POST", "/api/v1/analyze")}
+        # route -> which configured limit applies. The login is here because a
+        # single password with no limit can simply be guessed.
+        self.limited_routes = limited_routes or {
+            ("POST", "/api/v1/analyze"): "analyze",
+            ("POST", "/auth/session"): "login",
+        }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or (scope.get("method"), scope.get("path")) not in self.limited_routes:
+        route = (str(scope.get("method") or ""), str(scope.get("path") or ""))
+        bucket = self.limited_routes.get(route) if scope["type"] == "http" else None
+        if bucket is None:
             await self.app(scope, receive, send)
             return
 
         settings = get_settings()
-        limit = settings.rate_limit_per_minute
+        limit = settings.login_attempts_per_minute if bucket == "login" else settings.rate_limit_per_minute
         redis_client = getattr(scope["app"].state, "redis", None)
         if redis_client is None:
             await self.app(scope, receive, send)
@@ -119,8 +126,8 @@ class RateLimitMiddleware:
         now = time.time()
         current_window = int(now // self.window_seconds)
         elapsed = (now % self.window_seconds) / self.window_seconds
-        current_key = f"ratelimit:analyze:{ip}:{current_window}"
-        previous_key = f"ratelimit:analyze:{ip}:{current_window - 1}"
+        current_key = f"ratelimit:{bucket}:{ip}:{current_window}"
+        previous_key = f"ratelimit:{bucket}:{ip}:{current_window - 1}"
         try:
             pipe = redis_client.pipeline(transaction=True)
             pipe.incr(current_key)
@@ -141,11 +148,12 @@ class RateLimitMiddleware:
 
         if estimated > limit:
             retry_after = max(1, math.ceil(self.window_seconds - (now % self.window_seconds)))
-            logger.warning("rate_limit_exceeded", extra={"client_ip": ip, "limit": limit})
+            logger.warning("rate_limit_exceeded", extra={"client_ip": ip, "limit": limit, "bucket": bucket})
+            subject = "tentativas de login" if bucket == "login" else "análises"
             body = json.dumps(
                 error_body(
                     "rate_limit_exceeded",
-                    f"Limite de {limit} análises por minuto excedido. Tente novamente em {retry_after}s.",
+                    f"Limite de {limit} {subject} por minuto excedido. Tente novamente em {retry_after}s.",
                 ),
                 ensure_ascii=False,
             ).encode("utf-8")

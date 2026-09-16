@@ -4,16 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import Settings
-from app.models import InsightType
-from app.services.engagement import calculate_engagement_rate, calculate_engagement_score
-from app.services.insights_service import (
+from app.analyzer.models import InsightType
+from app.analyzer.services.insights_service import (
     InsightContext,
     InsightItem,
     InsightsGenerator,
     InsightsParseError,
     PerformanceAnalyzer,
 )
+from app.config import Settings
+from app.engagement import calculate_engagement_score, compute_engagement_rate
 
 
 def make_context(**overrides) -> InsightContext:
@@ -64,11 +64,16 @@ def ai_payload(count: int) -> str:
 
 # --------------------------------------------------------------------------- engagement formulas
 def test_engagement_rate_formula():
-    # (18500 + 1230 + 456*2 + 3200*1.5) / 250000 * 100
-    assert calculate_engagement_rate(250000, 18500, 1230, 456, 3200) == 10.18
-    assert calculate_engagement_rate(1000, 50, None, None, None) == 5.0
-    assert calculate_engagement_rate(0, 10, 1, 1, 1) is None
-    assert calculate_engagement_rate(None, 10, 1, 1, 1) is None
+    # (18500 + 1230 + 456 + 3200) / 250000 * 100, over views when reach is unknown
+    assert compute_engagement_rate(
+        {"views": 250000, "likes": 18500, "comments": 1230, "shares": 456, "saved": 3200}
+    ) == (9.35, "views")
+    assert compute_engagement_rate({"views": 1000, "likes": 50}) == (5.0, "views")
+    assert compute_engagement_rate({"views": 0, "likes": 10, "comments": 1}) == (None, None)
+    assert compute_engagement_rate({"likes": 10, "comments": 1}) == (None, None)
+    # The owner's own numbers win: reach first, then views, then followers.
+    assert compute_engagement_rate({"reach": 1000, "views": 5000, "likes": 100}) == (10.0, "reach")
+    assert compute_engagement_rate({"likes": 100}, 4000) == (2.5, "followers")
 
 
 def test_engagement_score_formula():
@@ -233,7 +238,7 @@ def test_rules_without_views_or_comments():
     context = make_context(
         metrics={"views": None, "likes": 10, "comments": 0, "shares": None, "saves": None,
                  "engagement_rate": None, "engagement_score": None},
-        sentiment={label: 0 for label in ["positive", "negative", "neutral", "doubt", "spam"]},
+        sentiment=dict.fromkeys(["positive", "negative", "neutral", "doubt", "spam"], 0),
         intents={}, topics=[], comments_sample=[],
     )
     result = InsightsGenerator(Settings()).generate(context)

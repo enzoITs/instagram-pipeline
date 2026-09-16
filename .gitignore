@@ -24,3 +24,8 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+.venv*/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+.mypy_cache/

@@ -26,7 +26,10 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bapify_api_[A-Za-z0-9]{6,}"), "apify_api_***"),
     (re.compile(r"\bhf_[A-Za-z0-9]{10,}"), "hf_***"),
     (
-        re.compile(r"(?i)\b(token|api[_-]?key|apikey|password|passwd|secret)(\"?\s*[=:]\s*\"?)[^\s&\"',;}]+"),
+        re.compile(
+            r"(?i)\b(access[_-]?token|token|api[_-]?key|apikey|client[_-]?secret|"
+            r"admin[_-]?password|password|passwd|secret)(\"?\s*[=:]\s*\"?)[^\s&\"',;}]+"
+        ),
         r"\1\2***",
     ),
     (re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^:/@\s]+:)[^@\s]+@"), r"\1***@"),

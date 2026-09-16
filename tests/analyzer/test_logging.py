@@ -96,12 +96,11 @@ async def test_check_database(db_engine, monkeypatch):
 
 
 def test_session_scope_rolls_back_on_error(db_engine):
-    from app.models import Video
+    from app.analyzer.models import Video
 
-    with pytest.raises(RuntimeError):
-        with session_scope() as session:
-            session.add(Video(instagram_id="ROLLBACK1", url="https://www.instagram.com/p/ROLLBACK1/"))
-            session.flush()
-            raise RuntimeError("abort")
+    with pytest.raises(RuntimeError), session_scope() as session:
+        session.add(Video(instagram_id="ROLLBACK1", url="https://www.instagram.com/p/ROLLBACK1/"))
+        session.flush()
+        raise RuntimeError("abort")
     with session_scope() as session:
         assert session.query(Video).count() == 0

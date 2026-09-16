@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,13 +14,20 @@ from app.schemas import CollectionResultOut, CollectionRunOut, TokenRefreshOut
 from app.security import require_session
 from app.services.collector import collect_account, collect_all_accounts
 from app.services.jobs_runtime import (
+    QueueUnavailableError,
+    dispatch_account_collection,
+    dispatch_all_accounts_collection,
     has_running_collection,
-    run_account_collection,
-    run_all_accounts_collection,
 )
 from app.services.token_service import refresh_account_token
 
 router = APIRouter(prefix="/api", tags=["jobs"], dependencies=[Depends(require_session)])
+
+_ALREADY_RUNNING = (
+    "A collection for this account is already running. Wait for it to finish "
+    "before starting another."
+)
+_QUEUE_DOWN = "Processing queue unavailable. Try again in a moment."
 
 
 @router.post(
@@ -49,32 +57,30 @@ def collect_one(
             "This account is disconnected. Reconnect it before collecting.",
         )
     if has_running_collection(db, account.id):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "A collection for this account is already running. Wait for it to "
-            "finish before starting another.",
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, _ALREADY_RUNNING)
 
     if wait:
         response.status_code = status.HTTP_200_OK
         result = collect_account(db, account, trigger="manual", limit=limit)
-        return CollectionResultOut(
-            run_id=result.run_id,
-            account_id=result.account_id,
-            status=result.status.value,
-            media_seen=result.media_seen,
-            media_created=result.media_created,
-            snapshots_created=result.snapshots_created,
-            api_calls=result.api_calls,
-            error=result.error,
-        )
+        return _result_out(result)
 
-    # Claim the run row synchronously so the caller gets an id it can poll.
+    # Claim the run row synchronously so the caller gets an id it can poll. The
+    # partial unique index on (account_id) WHERE status='RUNNING' is what makes
+    # two simultaneous requests resolve into one collection instead of two.
     run = CollectionRun(account_id=account.id, trigger="manual", status=RunStatus.RUNNING)
     db.add(run)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, _ALREADY_RUNNING) from exc
     db.refresh(run)
-    background_tasks.add_task(run_account_collection, account.id, run.id, limit)
+
+    try:
+        dispatch_account_collection(account.id, run.id, limit, background_tasks)
+    except QueueUnavailableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _QUEUE_DOWN) from exc
+
     return CollectionResultOut(
         run_id=run.id,
         account_id=account.id,
@@ -100,22 +106,12 @@ def collect_everything(
 ) -> list[CollectionResultOut]:
     if wait:
         response.status_code = status.HTTP_200_OK
-        results = collect_all_accounts(db, trigger="manual")
-        return [
-            CollectionResultOut(
-                run_id=r.run_id,
-                account_id=r.account_id,
-                status=r.status.value,
-                media_seen=r.media_seen,
-                media_created=r.media_created,
-                snapshots_created=r.snapshots_created,
-                api_calls=r.api_calls,
-                error=r.error,
-            )
-            for r in results
-        ]
+        return [_result_out(result) for result in collect_all_accounts(db, trigger="manual")]
 
-    background_tasks.add_task(run_all_accounts_collection, "manual")
+    try:
+        dispatch_all_accounts_collection("manual", background_tasks)
+    except QueueUnavailableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _QUEUE_DOWN) from exc
     return []
 
 
@@ -188,4 +184,17 @@ def _run_out(run: CollectionRun) -> CollectionRunOut:
         snapshots_created=run.snapshots_created,
         api_calls=run.api_calls,
         error=run.error,
+    )
+
+
+def _result_out(result) -> CollectionResultOut:  # noqa: ANN001 - collector.CollectionResult
+    return CollectionResultOut(
+        run_id=result.run_id,
+        account_id=result.account_id,
+        status=result.status.value,
+        media_seen=result.media_seen,
+        media_created=result.media_created,
+        snapshots_created=result.snapshots_created,
+        api_calls=result.api_calls,
+        error=result.error,
     )

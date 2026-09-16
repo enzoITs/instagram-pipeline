@@ -5,8 +5,8 @@ import time
 
 from sqlalchemy import func, select
 
+from app.analyzer.models import Comment
 from app.database import session_scope
-from app.models import Comment
 
 
 async def test_full_analysis_workflow(client):
@@ -60,7 +60,7 @@ async def test_full_analysis_workflow(client):
 
 
 async def test_failed_scrape_is_reported_to_the_client(client, monkeypatch):
-    from app.services.scraper_service import InstagramScraper, ScraperError
+    from app.analyzer.services.scraper_service import InstagramScraper, ScraperError
 
     def private_post(self, url):
         raise ScraperError("post privado ou exige login", transient=False)

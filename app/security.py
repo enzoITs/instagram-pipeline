@@ -1,13 +1,15 @@
 """Password login for the dashboard and the API.
 
-The app holds long-lived Instagram access tokens and can spend the Meta call
-quota, so leaving every endpoint open is only defensible on a machine nobody
-else can reach. Setting `ADMIN_PASSWORD` turns on a single-user session login;
-leaving it empty keeps the previous open behaviour, with a startup warning.
+The app holds long-lived Instagram access tokens, can spend the Meta call quota
+and can run paid link analyses, so leaving every endpoint open is only
+defensible on a machine nobody else can reach. Setting `ADMIN_PASSWORD` turns
+on a single-user session login; leaving it empty keeps the open behaviour, with
+a startup warning — and is refused outright in production.
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 from typing import Any
@@ -21,10 +23,25 @@ logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "ig_session"
 SESSION_SALT = "instagram-pipeline-session"
+SESSION_VERSION = 2
 
 
 def _serializer(settings: Settings) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.secret_key, salt=SESSION_SALT)
+
+
+def password_fingerprint(settings: Settings) -> str:
+    """Short keyed digest of the current password.
+
+    Stored inside the cookie so that changing `ADMIN_PASSWORD` invalidates every
+    session already issued — otherwise the only way to revoke access would be to
+    rotate `SECRET_KEY`, which also makes the encrypted access tokens unreadable.
+    """
+    return hmac.new(
+        settings.secret_key.encode("utf-8"),
+        settings.admin_password.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]
 
 
 def password_matches(candidate: str, settings: Settings | None = None) -> bool:
@@ -38,7 +55,7 @@ def password_matches(candidate: str, settings: Settings | None = None) -> bool:
 def issue_session(response: Response, settings: Settings | None = None) -> None:
     """Attach a signed session cookie to *response*."""
     settings = settings or get_settings()
-    token = _serializer(settings).dumps({"v": 1})
+    token = _serializer(settings).dumps({"v": SESSION_VERSION, "fp": password_fingerprint(settings)})
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
@@ -55,7 +72,7 @@ def clear_session(response: Response) -> None:
 
 
 def session_is_valid(request: Request, settings: Settings | None = None) -> bool:
-    """True when the request carries a signed, unexpired session cookie."""
+    """True when the request carries a signed, unexpired, still-current session."""
     settings = settings or get_settings()
     if not settings.auth_enabled:
         return True
@@ -63,12 +80,12 @@ def session_is_valid(request: Request, settings: Settings | None = None) -> bool
     if not token:
         return False
     try:
-        _serializer(settings).loads(
-            token, max_age=settings.session_max_age_hours * 3600
-        )
+        payload = _serializer(settings).loads(token, max_age=settings.session_max_age_hours * 3600)
     except (BadSignature, SignatureExpired):
         return False
-    return True
+    if not isinstance(payload, dict) or payload.get("v") != SESSION_VERSION:
+        return False  # cookie from an older format: sign in again
+    return hmac.compare_digest(str(payload.get("fp", "")), password_fingerprint(settings))
 
 
 def require_session(request: Request) -> None:

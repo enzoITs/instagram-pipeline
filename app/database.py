@@ -1,18 +1,31 @@
-"""Database engine, session factory and declarative base."""
+"""Database engines, session factories, the declarative base and migrations.
+
+Two engines point at the same database:
+
+* a blocking engine for the account routes, the Celery workers and Alembic;
+* an asyncio engine for the link-analysis routes, which were written async.
+
+Both come from one ``DATABASE_URL`` and, on PostgreSQL, one driver (psycopg 3
+speaks both). The two worlds never share a session: mixing sync and async
+SQLAlchemy contexts is a classic source of ``greenlet_spawn`` errors.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, TypeDecorator, create_engine, event, inspect
+from sqlalchemy import DateTime, TypeDecorator, create_engine, event, inspect, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import BASE_DIR, get_settings
+from app.config import BASE_DIR, Settings, get_settings
 
 if TYPE_CHECKING:
     from alembic.config import Config
@@ -28,25 +41,33 @@ MIGRATIONS_DIR = BASE_DIR / "migrations"
 # revisions can be applied to them instead of failing.
 BASELINE_REVISION = "0001"
 
-_connect_args: dict[str, object] = {}
-if settings.database_url.startswith("sqlite"):
-    # FastAPI runs sync endpoints in a threadpool, so a connection may be used
-    # from a different thread than the one that created it.
-    _connect_args = {"check_same_thread": False}
+
+def _engine_options(config: Settings) -> dict[str, Any]:
+    if config.is_sqlite:
+        # FastAPI runs sync endpoints in a threadpool, so a connection may be
+        # used from a different thread than the one that created it.
+        return {"connect_args": {"check_same_thread": False, "timeout": 30}}
+    return {
+        "pool_size": config.db_pool_size,
+        "max_overflow": config.db_max_overflow,
+        "pool_timeout": config.db_pool_timeout_seconds,
+        "pool_recycle": 1800,
+        "connect_args": {"options": f"-c statement_timeout={config.db_statement_timeout_ms}"},
+    }
+
 
 engine = create_engine(
-    settings.database_url,
-    connect_args=_connect_args,
+    settings.sync_database_url,
     pool_pre_ping=True,
-    echo=False,
     future=True,
+    **_engine_options(settings),
 )
 
 
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:  # noqa: ANN001
-    """Enable foreign keys and WAL mode on SQLite connections."""
-    if engine.dialect.name != "sqlite":
+    """Enable foreign keys and WAL mode on SQLite connections (sync and async)."""
+    if not settings.is_sqlite:
         return
     cursor = dbapi_connection.cursor()
     try:
@@ -91,6 +112,7 @@ class Base(DeclarativeBase):
     """Declarative base shared by every ORM model."""
 
 
+# ------------------------------------------------------------------ sync side
 def get_db() -> Iterator[Session]:
     """FastAPI dependency yielding a request-scoped session."""
     db = SessionLocal()
@@ -102,18 +124,73 @@ def get_db() -> Iterator[Session]:
 
 @contextmanager
 def session_scope() -> Iterator[Session]:
-    """Context manager used by background jobs and scripts."""
+    """Transactional scope for jobs and scripts: commit on success, rollback on error."""
     db = SessionLocal()
     try:
         yield db
         db.commit()
-    except Exception:
+    except BaseException:
         db.rollback()
         raise
     finally:
         db.close()
 
 
+def get_sync_engine() -> Engine:
+    return engine
+
+
+def reset_sync_engine() -> None:
+    """Drop pooled connections inherited across a fork (Celery prefork children).
+
+    ``close=False`` leaves the parent's sockets alone and simply stops this
+    process from reusing them.
+    """
+    engine.dispose(close=False)
+
+
+# ----------------------------------------------------------------- async side
+@lru_cache
+def get_async_engine() -> AsyncEngine:
+    """Created lazily, so each process builds its own pool after start-up/fork."""
+    config = get_settings()
+    return create_async_engine(config.async_database_url, pool_pre_ping=True, **_engine_options(config))
+
+
+@lru_cache
+def get_async_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_async_engine(), expire_on_commit=False)
+
+
+async def get_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency: one async session per request, rolled back if not committed."""
+    async with get_async_sessionmaker()() as session:
+        yield session
+
+
+async def check_database(timeout: float = 2.0) -> bool:
+    """Health probe: `SELECT 1` bounded by `timeout` seconds."""
+
+    async def _probe() -> None:
+        async with get_async_engine().connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.wait_for(_probe(), timeout=timeout)
+        return True
+    except Exception as exc:  # noqa: BLE001 - any failure means "disconnected"
+        logger.warning("database_health_check_failed", extra={"error": type(exc).__name__})
+        return False
+
+
+async def dispose_async_engine() -> None:
+    if get_async_engine.cache_info().currsize:
+        await get_async_engine().dispose()
+    get_async_sessionmaker.cache_clear()
+    get_async_engine.cache_clear()
+
+
+# ----------------------------------------------------------------- migrations
 def _alembic_config(connection) -> Config:  # noqa: ANN001
     """Build an Alembic config bound to an already-open connection.
 
@@ -131,11 +208,12 @@ def _alembic_config(connection) -> Config:  # noqa: ANN001
 def init_db() -> None:
     """Bring the database up to the current schema.
 
-    A brand-new database is created straight from the models and stamped at the
-    latest revision. An existing one is migrated: databases predating Alembic
-    carry no version table, so they are stamped at the baseline first and then
-    upgraded. Doing this at startup means a routine `git pull` never leaves the
-    schema behind the code.
+    Every database — including a brand-new one — goes through the migration
+    chain, so the schema the app runs on is exactly the one the migrations
+    describe (and the test suite exercises them). Databases predating Alembic
+    carry tables but no version table; they are stamped at the baseline first
+    and then upgraded. Doing this at startup means a routine `git pull` never
+    leaves the schema behind the code.
     """
     from alembic import command
 
@@ -145,12 +223,7 @@ def init_db() -> None:
 
     with _migration_connection() as connection:
         config = _alembic_config(connection)
-        if not tables:
-            Base.metadata.create_all(bind=connection)
-            command.stamp(config, "head")
-            logger.info("Created a new database at the latest schema revision.")
-            return
-        if "alembic_version" not in tables:
+        if tables and "alembic_version" not in tables:
             command.stamp(config, BASELINE_REVISION)
             logger.info(
                 "Existing database had no migration history; stamped it at %s.",

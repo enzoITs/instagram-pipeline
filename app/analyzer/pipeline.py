@@ -23,12 +23,11 @@ from typing import Any, Literal
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import delete, insert, select, update
-from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
-from app.database import session_scope
-from app.models import (
+from app.analyzer import graph_source
+from app.analyzer.models import (
     Comment,
     EngagementMetrics,
     Insight,
@@ -37,15 +36,20 @@ from app.models import (
     SentimentLabel,
     TopicAnalysis,
     Video,
+    VideoMetricSnapshot,
     VideoStatus,
     utcnow,
 )
-from app.repository import load_analysis_sync, upsert_cache_backup
-from app.schemas import STEP_LABELS, TOTAL_STEPS
-from app.services.cache_service import SyncCacheService, get_sync_redis
-from app.services.engagement import calculate_engagement_rate, calculate_engagement_score
-from app.services.insights_service import InsightContext, InsightsGenerator
-from app.services.scraper_service import InstagramScraper, ScrapedPost, ScraperError
+from app.analyzer.repository import load_analysis_sync, upsert_cache_backup
+from app.analyzer.schemas import STEP_LABELS, TOTAL_STEPS
+from app.analyzer.services.cache_service import SyncCacheService, get_sync_redis
+from app.analyzer.services.insights_service import InsightContext, InsightsGenerator
+from app.analyzer.services.scraper_service import InstagramScraper, ScrapedPost, ScraperError
+from app.analyzer.tracking import metrics_of
+from app.config import get_settings
+from app.database import session_scope
+from app.engagement import calculate_engagement_score, compute_engagement_rate
+from app.instagram.url import InstagramURL, parse_instagram_url
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +69,21 @@ class PermanentAnalysisError(Exception):
     """Failure that retrying cannot fix (e.g. private or deleted post)."""
 
 
+GraphLoader = Callable[[Session, InstagramURL], tuple[ScrapedPost, int] | None]
+
+
 @dataclass
 class PipelineDeps:
     scraper_factory: Callable[[], AbstractContextManager[InstagramScraper]]
     nlp: Any
     insights: InsightsGenerator
     cache: SyncCacheService
+    # Posts of connected accounts are read from the official API instead.
+    graph_loader: GraphLoader = graph_source.load_owned_post
 
 
 def default_deps() -> PipelineDeps:
-    from app.services.nlp_service import get_nlp_analyzer  # heavy import only inside the worker
+    from app.analyzer.services.nlp_service import get_nlp_analyzer  # heavy import only inside the worker
 
     return PipelineDeps(
         scraper_factory=InstagramScraper,
@@ -109,7 +118,13 @@ class _Measure:
 
 
 # --------------------------------------------------------------------------- pipeline
-def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | None = None) -> dict[str, Any]:
+def run_analysis(
+    video_id: uuid.UUID,
+    *,
+    attempt: int = 1,
+    deps: PipelineDeps | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     deps = deps or default_deps()
     settings = get_settings()
     timer = StepTimer()
@@ -118,30 +133,23 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
 
     # 1. Prepare --------------------------------------------------------------
     with session_scope() as session:
-        video = _get_video(session, video_id)
+        video = _get_video(session, video_id, task_id)
         video.status = VideoStatus.PROCESSING
         video.error_message = None
         video.current_step = 1
         url, instagram_id = video.url, video.instagram_id
 
-    # 2. Scrape ---------------------------------------------------------------
-    _advance(video_id, 2)
+    # 2. Collect ---------------------------------------------------------------
+    _advance(video_id, 2, task_id)
     with timer.measure("scraping"):
-        try:
-            with deps.scraper_factory() as scraper:
-                post = scraper.scrape(url)
-        except ScraperError as exc:
-            if exc.transient:
-                raise TransientAnalysisError(str(exc)) from exc
-            raise PermanentAnalysisError(
-                f"Não foi possível acessar o post ({exc}). Verifique se o link está correto e se o post é público."
-            ) from exc
+        post, media_id = collect_post(url, deps)
 
     # 3. Store metadata, metrics and comments --------------------------------------
     comment_ids = [uuid.uuid4() for _ in post.comments]
     with timer.measure("storage"), session_scope() as session:
-        video = _get_video(session, video_id)
+        video = _get_video(session, video_id, task_id)
         video.current_step = 3
+        video.media_id = media_id
         _apply_post_metadata(video, post)
         _clear_previous_results(session, video_id)
         session.add(
@@ -152,6 +160,7 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
                 comments_count=post.comments_count,
                 shares=post.shares,
                 saves=post.saves,
+                reach=post.reach,
             )
         )
         if post.comments:
@@ -167,19 +176,19 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
                         "likes": comment.likes,
                         "created_at": comment.created_at,
                     }
-                    for comment_pk, comment in zip(comment_ids, post.comments)
+                    for comment_pk, comment in zip(comment_ids, post.comments, strict=True)
                 ],
             )
 
     # 4. NLP ------------------------------------------------------------------
-    _advance(video_id, 4)
+    _advance(video_id, 4, task_id)
     with timer.measure("nlp"):
         nlp_result = deps.nlp.analyze([comment.text for comment in post.comments])
     analyses = nlp_result.comments
 
     # 5. Store NLP results --------------------------------------------------------
     with timer.measure("nlp_storage"), session_scope() as session:
-        _get_video(session, video_id).current_step = 5
+        _get_video(session, video_id, task_id).current_step = 5
         if analyses:
             session.execute(
                 insert(SentimentAnalysis),
@@ -191,7 +200,7 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
                         "intent_category": analysis.intent_category,
                         "key_phrases": analysis.key_phrases,
                     }
-                    for comment_pk, analysis in zip(comment_ids, analyses)
+                    for comment_pk, analysis in zip(comment_ids, analyses, strict=True)
                 ],
             )
         if nlp_result.topics:
@@ -215,20 +224,22 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
         intent_counts = Counter(analysis.intent_category.value for analysis in analyses)
         non_spam = len(analyses) - sentiment_counts.get(SentimentLabel.SPAM.value, 0)
         positive_ratio = sentiment_counts.get(SentimentLabel.POSITIVE.value, 0) / non_spam if non_spam else 0.0
-        engagement_rate = calculate_engagement_rate(
-            post.views, post.likes, post.comments_count, post.shares, post.saves
-        )
+        engagement_rate, engagement_basis = compute_engagement_rate(metrics_of(post), post.followers_count)
         engagement_score = calculate_engagement_score(engagement_rate, positive_ratio)
         with session_scope() as session:
-            _get_video(session, video_id).current_step = 6
+            _get_video(session, video_id, task_id).current_step = 6
             session.execute(
                 update(EngagementMetrics)
                 .where(EngagementMetrics.video_id == video_id)
-                .values(engagement_rate=engagement_rate, engagement_score=engagement_score)
+                .values(
+                    engagement_rate=engagement_rate,
+                    engagement_basis=engagement_basis,
+                    engagement_score=engagement_score,
+                )
             )
 
     # 7. AI insights ----------------------------------------------------------
-    _advance(video_id, 7)
+    _advance(video_id, 7, task_id)
     with timer.measure("insights"):
         context = InsightContext(
             caption=post.caption,
@@ -241,7 +252,9 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
                 "comments": post.comments_count,
                 "shares": post.shares,
                 "saves": post.saves,
+                "reach": post.reach,
                 "engagement_rate": engagement_rate,
+                "engagement_basis": engagement_basis,
                 "engagement_score": engagement_score,
             },
             sentiment={label.value: sentiment_counts.get(label.value, 0) for label in SentimentLabel},
@@ -262,8 +275,9 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
 
     # 8. Persist insights, finalize and cache -------------------------------------------
     warnings = [*post.warnings, *nlp_result.warnings, *insights_result.warnings]
+    completed_at = datetime.now(timezone.utc)
     with timer.measure("finalize"), session_scope() as session:
-        video = _get_video(session, video_id)
+        video = _get_video(session, video_id, task_id)
         if insights_result.insights:
             session.execute(
                 insert(Insight),
@@ -279,12 +293,35 @@ def run_analysis(video_id: uuid.UUID, *, attempt: int = 1, deps: PipelineDeps | 
                     for item in insights_result.insights
                 ],
             )
+        # First point of this link's history; tracking appends to it later.
+        session.execute(
+            delete(VideoMetricSnapshot).where(
+                VideoMetricSnapshot.video_id == video_id,
+                VideoMetricSnapshot.collected_at == completed_at,
+            )
+        )
+        session.add(
+            VideoMetricSnapshot(
+                video_id=video_id,
+                collected_at=completed_at,
+                source=post.source,
+                views=post.views,
+                likes=post.likes,
+                comments_count=post.comments_count,
+                shares=post.shares,
+                saves=post.saves,
+                reach=post.reach,
+                engagement_rate=engagement_rate,
+                engagement_basis=engagement_basis,
+            )
+        )
         video.current_step = TOTAL_STEPS
         video.status = VideoStatus.COMPLETED
-        video.completed_at = datetime.now(timezone.utc)
+        video.completed_at = completed_at
         video.processing_stats = {
             "attempt": attempt,
             "data_source": post.source,
+            "engagement_basis": engagement_basis,
             "nlp_backend": nlp_result.backend,
             "insights_source": insights_result.source,
             "comments_analyzed": len(analyses),
@@ -339,7 +376,9 @@ def execute_attempt(
 ) -> AttemptResult:
     """Run one attempt and do all failure bookkeeping (status, retries, dead-letter queue)."""
     try:
-        return AttemptResult("completed", detail=run_analysis(video_id, attempt=attempt, deps=deps))
+        return AttemptResult(
+            "completed", detail=run_analysis(video_id, attempt=attempt, deps=deps, task_id=task_id)
+        )
     except AnalysisCancelled:
         logger.info("analysis_cancelled", extra={"video_id": str(video_id)})
         return AttemptResult("cancelled", detail={"video_id": str(video_id)})
@@ -350,6 +389,13 @@ def execute_attempt(
         message = "Tempo limite de processamento excedido. Tente novamente mais tarde."
         _fail(video_id, message, exc, attempt=attempt, task_id=task_id, dead_letter=True)
         return AttemptResult("failed", error=exc, detail={"video_id": str(video_id), "error": message})
+    except IntegrityError as exc:
+        # The row vanished (deleted mid-run) or another attempt of the same job
+        # already wrote these results: neither deserves a dead-letter entry.
+        if not _video_exists(video_id):
+            logger.info("analysis_cancelled", extra={"video_id": str(video_id)})
+            return AttemptResult("cancelled", detail={"video_id": str(video_id)})
+        return _unexpected(video_id, exc, attempt=attempt, task_id=task_id)
     except (TransientAnalysisError, OperationalError, DBAPIError) as exc:
         if isinstance(exc, DBAPIError) and not isinstance(exc, OperationalError) and not exc.connection_invalidated:
             return _unexpected(video_id, exc, attempt=attempt, task_id=task_id)
@@ -457,19 +503,75 @@ def push_dead_letter(
         logger.exception("dead_letter_push_failed", extra={"video_id": str(video_id)})
 
 
+# --------------------------------------------------------------------------- collection
+def collect_post(url: str, deps: PipelineDeps) -> tuple[ScrapedPost, int | None]:
+    """Best data available for this URL, and the connected post it belongs to.
+
+    A post of a connected account is read from the Graph API, which is the only
+    source for reach, saves and shares. Comments still come from the scraper
+    unless `ENABLE_GRAPH_COMMENTS` is on, and a scraping failure no longer sinks
+    the analysis when the official metrics are already in hand.
+    """
+    parsed = parse_instagram_url(url)
+    official: ScrapedPost | None = None
+    media_id: int | None = None
+    try:
+        with session_scope() as session:
+            found = deps.graph_loader(session, parsed)
+        if found is not None:
+            official, media_id = found
+    except Exception:  # noqa: BLE001 - the scraper is still available
+        logger.exception("graph_source_failed", extra={"instagram_id": parsed.shortcode})
+
+    if official is not None and official.comments:
+        return official, media_id
+
+    try:
+        with deps.scraper_factory() as scraper:
+            scraped = scraper.scrape(url)
+    except ScraperError as exc:
+        if official is not None:
+            official.warnings.append(
+                f"Comentários não puderam ser coletados ({exc}); métricas oficiais mantidas."
+            )
+            return official, media_id
+        if exc.transient:
+            raise TransientAnalysisError(str(exc)) from exc
+        raise PermanentAnalysisError(
+            f"Não foi possível acessar o post ({exc}). Verifique se o link está correto e se o post é público."
+        ) from exc
+
+    if official is not None:
+        return graph_source.merge_official_metrics(official, scraped), media_id
+    return scraped, media_id
+
+
 # --------------------------------------------------------------------------- helpers
-def _get_video(session: Session, video_id: uuid.UUID) -> Video:
+def _get_video(session: Session, video_id: uuid.UUID, task_id: str | None = None) -> Video:
     video = session.get(Video, video_id)
     if video is None:
+        raise AnalysisCancelled(str(video_id))
+    if task_id is not None and video.task_id is not None and video.task_id != task_id:
+        # The API re-dispatched this analysis (stale job, or the broker
+        # re-delivered the message): the newest job owns the row, this one stops.
         raise AnalysisCancelled(str(video_id))
     return video
 
 
-def _advance(video_id: uuid.UUID, step: int) -> None:
+def _video_exists(video_id: uuid.UUID) -> bool:
+    try:
+        with session_scope() as session:
+            return session.get(Video, video_id) is not None
+    except Exception:  # noqa: BLE001 - treat an unreachable database as "still there"
+        return True
+
+
+def _advance(video_id: uuid.UUID, step: int, task_id: str | None = None) -> None:
     with session_scope() as session:
-        result = session.execute(
-            update(Video).where(Video.id == video_id).values(current_step=step, updated_at=utcnow())
-        )
+        statement = update(Video).where(Video.id == video_id).values(current_step=step, updated_at=utcnow())
+        if task_id is not None:
+            statement = statement.where((Video.task_id == task_id) | (Video.task_id.is_(None)))
+        result = session.execute(statement)
         if result.rowcount == 0:  # type: ignore[attr-defined]
             raise AnalysisCancelled(str(video_id))
     logger.info("analysis_step", extra={"video_id": str(video_id), "step": step, "label": STEP_LABELS[step]})
@@ -512,7 +614,7 @@ def _comments_sample(post: ScrapedPost, analyses: list[Any], limit: int = 25) ->
             "sentiment": analysis.sentiment.value,
             "intent": analysis.intent_category.value,
         }
-        for comment, analysis in zip(post.comments, analyses)
+        for comment, analysis in zip(post.comments, analyses, strict=True)
         if analysis.sentiment is not SentimentLabel.SPAM
     ]
     rows.sort(key=lambda row: -row["likes"])

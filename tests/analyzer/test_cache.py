@@ -4,10 +4,9 @@ import fakeredis
 import pytest
 from sqlalchemy import select
 
-from app.database import get_async_sessionmaker, dispose_async_engine, session_scope
-from app.models import AnalysisCache
-from app.repository import delete_cache_backup, get_cache_backup, upsert_cache_backup
-from app.services.cache_service import (
+from app.analyzer.models import AnalysisCache
+from app.analyzer.repository import delete_cache_backup, get_cache_backup, upsert_cache_backup
+from app.analyzer.services.cache_service import (
     STATS_HITS_KEY,
     CacheService,
     SyncCacheService,
@@ -17,6 +16,7 @@ from app.services.cache_service import (
     get_sync_redis,
     serialize,
 )
+from app.database import dispose_async_engine, get_async_sessionmaker, session_scope
 
 PAYLOAD = {"video_id": "abc", "metrics": {"views": 10}, "caption": "Acentuação 😍"}
 

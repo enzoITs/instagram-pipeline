@@ -128,6 +128,7 @@ def seed(db, *, posts: int, runs: int) -> None:
                     total_interactions=total_interactions(metrics),
                     engagement_rate=rate,
                     engagement_basis=basis,
+                    engagement_denominator=metrics.get(basis) if basis != "followers" else followers,
                     raw={"demo": True},
                 )
             )
@@ -157,11 +158,51 @@ def seed(db, *, posts: int, runs: int) -> None:
     )
 
 
+DEMO_LINKS = [
+    "https://www.instagram.com/reel/DemoReel001/",
+    "https://www.instagram.com/p/DemoPost002/",
+]
+
+
+def seed_analyses(urls: list[str]) -> None:
+    """Run the real pipeline against synthetic data, so the analysis screens
+    have something to show without any API key."""
+    import os
+
+    os.environ.setdefault("SCRAPER_MODE", "mock")
+    os.environ.setdefault("NLP_BACKEND", "lexicon")
+
+    from app.analyzer.models import Video
+    from app.analyzer.pipeline import run_analysis
+    from app.instagram.url import parse_instagram_url
+
+    for url in urls:
+        parsed = parse_instagram_url(url)
+        with session_scope() as db:
+            existing = db.scalar(select(Video).where(Video.instagram_id == parsed.shortcode))
+            if existing is not None:
+                print(f"Analysis for {parsed.shortcode} already exists; skipping.")
+                continue
+            video = Video(
+                instagram_id=parsed.shortcode, url=parsed.canonical_url, media_type=parsed.media_type
+            )
+            db.add(video)
+            db.flush()
+            video_id = video.id
+        run_analysis(video_id)
+        print(f"Seeded demo analysis for {parsed.shortcode}.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reset", action="store_true", help="delete the demo account first")
     parser.add_argument("--posts", type=int, default=24, help="how many posts to create")
     parser.add_argument("--runs", type=int, default=14, help="how many collection runs to simulate")
+    parser.add_argument(
+        "--skip-analyses",
+        action="store_true",
+        help="do not create the demo link analyses (they need the worker dependencies)",
+    )
     args = parser.parse_args()
 
     init_db()
@@ -173,7 +214,12 @@ def main() -> int:
             print("The demo account already exists. Re-run with --reset to recreate it.")
             return 0
         seed(db, posts=args.posts, runs=args.runs)
-    print("Done. Start the app with: uvicorn app.main:app --reload")
+    if not args.skip_analyses:
+        try:
+            seed_analyses(DEMO_LINKS)
+        except ImportError as exc:  # NLP extras are worker-only
+            print(f"Skipped the demo analyses ({exc}). Install requirements-worker.txt for them.")
+    print("Done. Start the app with: ./run.sh")
     return 0
 
 

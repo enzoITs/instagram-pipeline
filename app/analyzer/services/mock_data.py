@@ -10,8 +10,8 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta, timezone
 
-from app.instagram_url import InstagramURL
-from app.services.scraper_service import ScrapedComment, ScrapedPost
+from app.analyzer.services.scraper_service import ScrapedComment, ScrapedPost
+from app.instagram.url import InstagramURL
 
 MOCK_WARNING = "Dados de demonstração gerados localmente (SCRAPER_MODE=mock); não refletem o post real."
 

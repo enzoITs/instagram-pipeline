@@ -8,10 +8,17 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
-from app import pipeline
-from app.database import session_scope
-from app.models import Comment, EngagementMetrics, Insight, SentimentAnalysis, TopicAnalysis, Video, VideoStatus
-from app.pipeline import (
+from app.analyzer import pipeline
+from app.analyzer.models import (
+    Comment,
+    EngagementMetrics,
+    Insight,
+    SentimentAnalysis,
+    TopicAnalysis,
+    Video,
+    VideoStatus,
+)
+from app.analyzer.pipeline import (
     DLQ_KEY,
     AnalysisCancelled,
     StepTimer,
@@ -21,8 +28,9 @@ from app.pipeline import (
     run_analysis,
     run_analysis_with_retries,
 )
-from app.services.cache_service import cache_key
-from app.services.scraper_service import InstagramScraper, ScraperError
+from app.analyzer.services.cache_service import cache_key
+from app.analyzer.services.scraper_service import InstagramScraper, ScraperError
+from app.database import session_scope
 
 
 def failing_scraper(*errors):
@@ -297,13 +305,23 @@ def test_celery_configuration_and_worker_init(monkeypatch):
 
     conf = celery_module.celery_app.conf
     assert conf.task_acks_late is True
-    assert conf.task_time_limit == 300 and conf.task_soft_time_limit == 270
+    # Scraping alone may take SCRAPER_BUDGET_SECONDS, then NLP and OpenAI run on top.
+    assert conf.task_time_limit == 480 and conf.task_soft_time_limit == 420
     assert conf.broker_transport_options["visibility_timeout"] > conf.task_time_limit
     assert conf.task_default_queue == "analysis"
+    # Collection jobs go to their own queue, away from the NLP workers.
+    assert conf.task_routes["app.tasks.collect_account"]["queue"] == "collection"
 
     celery_module._setup_logging()
     monkeypatch.setattr(celery_module.settings, "nlp_torch_threads", None)
     monkeypatch.setattr(celery_module.celery_app.conf, "worker_concurrency", 1)
+
+    # The collection worker skips the 2 GB of models it would never use.
+    monkeypatch.setattr(celery_module.settings, "worker_preload_nlp", False)
+    celery_module._init_worker_process()
+    assert celery_module.settings.nlp_torch_threads is None
+
+    monkeypatch.setattr(celery_module.settings, "worker_preload_nlp", True)
     celery_module._init_worker_process()  # lexicon backend in tests: fast
     assert celery_module.settings.nlp_torch_threads == celery_module.torch_threads_per_process(processes=1)
 

@@ -12,21 +12,23 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Select, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import (
+from app.analyzer.models import (
     AnalysisCache,
     Comment,
     EngagementMetrics,
     SentimentAnalysis,
     Video,
 )
-from app.schemas import (
+from app.analyzer.schemas import (
     AnalysisData,
     CommentOut,
     InsightOut,
     IntentDistribution,
+    MetricPointOut,
     MetricsOut,
     ProcessingInfo,
     SentimentAnalysisOut,
@@ -43,7 +45,12 @@ SAMPLE_PER_SENTIMENT = 10  # up to 50 comments: enough for the dashboard, small 
 def video_statement(video_id: uuid.UUID) -> Select[Any]:
     return (
         select(Video)
-        .options(selectinload(Video.metrics), selectinload(Video.topics), selectinload(Video.insights))
+        .options(
+            selectinload(Video.metrics),
+            selectinload(Video.topics),
+            selectinload(Video.insights),
+            selectinload(Video.snapshots),
+        )
         .where(Video.id == video_id)
     )
 
@@ -113,6 +120,7 @@ def build_analysis_data(
             instagram_id=video.instagram_id,
             url=video.url,
             media_type=video.media_type,
+            owned=video.media_id is not None,
             creator_username=with_at(video.creator_username),
             caption=video.caption,
             thumbnail_url=video.thumbnail_url,
@@ -125,9 +133,26 @@ def build_analysis_data(
             comments=metrics.comments_count if metrics else None,
             shares=metrics.shares if metrics else None,
             saves=metrics.saves if metrics else None,
+            reach=metrics.reach if metrics else None,
             engagement_rate=metrics.engagement_rate if metrics else None,
+            engagement_basis=metrics.engagement_basis if metrics else None,
             engagement_score=metrics.engagement_score if metrics else None,
         ),
+        tracked=bool(video.tracked),
+        history=[
+            MetricPointOut(
+                collected_at=snapshot.collected_at,
+                views=snapshot.views,
+                likes=snapshot.likes,
+                comments=snapshot.comments_count,
+                shares=snapshot.shares,
+                saves=snapshot.saves,
+                reach=snapshot.reach,
+                engagement_rate=snapshot.engagement_rate,
+                engagement_basis=snapshot.engagement_basis,
+            )
+            for snapshot in sorted(video.snapshots, key=lambda row: row.collected_at)
+        ],
         sentiment=SentimentDistribution(**{str(label): int(count) for label, count in sentiment_rows}),
         intents=IntentDistribution(**{str(label): int(count) for label, count in intent_rows}),
         top_topics=[
@@ -202,16 +227,31 @@ async def load_analysis_async(session: AsyncSession, video_id: uuid.UUID) -> Ana
 
 # --------------------------------------------------------------------------- cache backup
 def upsert_cache_backup(session: Session, instagram_id: str, data: dict[str, Any], ttl_seconds: int) -> None:
+    """Write (or replace) the durable copy of one analysis.
+
+    Two workers can reach this at the same time for the same post, so the insert
+    is tried inside a savepoint and a lost race falls through to the update
+    instead of blowing up the surrounding transaction.
+    """
     now = datetime.now(timezone.utc)
-    ttl_minutes = max(1, ttl_seconds // 60)
+    values = {
+        "analysis_data": data,
+        "ttl_minutes": max(1, ttl_seconds // 60),
+        "expires_at": now + timedelta(seconds=ttl_seconds),
+        "updated_at": now,
+    }
     row = session.scalars(select(AnalysisCache).where(AnalysisCache.video_instagram_id == instagram_id)).first()
     if row is None:
-        row = AnalysisCache(video_instagram_id=instagram_id)
-        session.add(row)
-    row.analysis_data = data
-    row.ttl_minutes = ttl_minutes
-    row.expires_at = now + timedelta(seconds=ttl_seconds)
-    row.updated_at = now
+        try:
+            with session.begin_nested():
+                session.add(AnalysisCache(video_instagram_id=instagram_id, **values))
+            return
+        except IntegrityError:
+            row = session.scalars(
+                select(AnalysisCache).where(AnalysisCache.video_instagram_id == instagram_id)
+            ).one()
+    for field, value in values.items():
+        setattr(row, field, value)
 
 
 async def get_cache_backup(session: AsyncSession, instagram_id: str) -> dict[str, Any] | None:

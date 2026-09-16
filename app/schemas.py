@@ -40,6 +40,7 @@ class AccountSummary(BaseModel):
     total_reach: int
     total_views: int
     average_engagement_rate: float | None = None
+    engagement_basis: str | None = None
     first_collected_at: datetime | None = None
     last_collected_at: datetime | None = None
 
@@ -93,6 +94,7 @@ class MediaPage(BaseModel):
 # ----------------------------------------------------------------- analytics
 class TimeseriesPoint(BaseModel):
     collected_at: datetime
+    engagement_basis: str | None = None
     likes: int = 0
     comments: int = 0
     saved: int = 0
@@ -107,6 +109,7 @@ class MediaTypeBreakdown(BaseModel):
     media_product_type: str
     media_count: int
     average_engagement_rate: float | None = None
+    engagement_basis: str | None = None
     total_reach: int = 0
     total_views: int = 0
 
@@ -153,6 +156,8 @@ class HealthOut(BaseModel):
     status: str
     auth_required: bool = False
     database: str = "ok"
+    redis: str = "ok"
+    version: str | None = None
     environment: str | None = None
     meta_configured: bool | None = None
     login_flow: str | None = None
@@ -160,6 +165,8 @@ class HealthOut(BaseModel):
     scheduler_running: bool | None = None
     connected_accounts: int | None = None
     next_collection_at: datetime | None = None
+    analyses: int | None = None
+    cache_hit_ratio: float | None = None
 
 
 class SessionOut(BaseModel):

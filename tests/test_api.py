@@ -99,7 +99,9 @@ class TestSystem:
         page = http_client.get("/")
         assert page.status_code == 200
         assert "Instagram Pipeline" in page.text
-        assert http_client.get("/static/app.js").status_code == 200
+        # The single-page app and its hashed bundle come from frontend/dist.
+        assert http_client.get("/assets/app.js").status_code == 200
+        assert http_client.get("/favicon.svg").status_code == 200
         assert http_client.get("/docs").status_code == 200
 
 
@@ -123,7 +125,10 @@ class TestAccounts:
         # Newest snapshots only: 200 + 60 likes, not all four rows.
         assert body["total_likes"] == 260
         assert body["total_reach"] == 2600
-        assert body["average_engagement_rate"] == pytest.approx(12.67, abs=0.01)
+        # Weighted, not an average of percentages: (270 + 71) interactions over
+        # the 2600 accounts they reached.
+        assert body["average_engagement_rate"] == pytest.approx(13.12, abs=0.01)
+        assert body["engagement_basis"] == "reach"
         assert body["account"]["username"] == "test.account"
 
     def test_summary_of_an_account_without_data(self, http_client, account) -> None:
@@ -140,6 +145,9 @@ class TestAccounts:
         assert points[0]["likes"] == 150  # 100 + 50 at the older collection
         assert points[1]["likes"] == 260
         assert points[0]["media_count"] == 2
+        # (135 + 58) interactions over the 1500 reached at that collection.
+        assert points[0]["engagement_rate"] == pytest.approx(12.87, abs=0.01)
+        assert points[0]["engagement_basis"] == "reach"
         # Timestamps carry an explicit UTC marker so the browser does not
         # reinterpret them as local time.
         assert points[0]["collected_at"].endswith("Z")
@@ -147,7 +155,7 @@ class TestAccounts:
     def test_timeseries_respects_the_range(self, http_client, populated) -> None:
         account_id = populated["account"].id
         assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=1").json()
-        assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=800").status_code == 422
+        assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=800").status_code == 400
 
     def test_breakdown_groups_by_product_type(self, http_client, populated) -> None:
         account_id = populated["account"].id
@@ -157,6 +165,9 @@ class TestAccounts:
         assert set(by_type) == {"REELS", "FEED"}
         assert by_type["REELS"]["media_count"] == 1
         assert by_type["REELS"]["total_reach"] == 2000
+        assert by_type["REELS"]["average_engagement_rate"] == pytest.approx(13.5, abs=0.01)
+        assert by_type["FEED"]["average_engagement_rate"] == pytest.approx(11.83, abs=0.01)
+        assert by_type["FEED"]["engagement_basis"] == "reach"
 
     def test_unknown_account_returns_404(self, http_client) -> None:
         assert http_client.get("/api/accounts/9999/summary").status_code == 404
@@ -200,7 +211,7 @@ class TestMedia:
     def test_invalid_ordering_is_rejected(self, http_client, populated) -> None:
         account_id = populated["account"].id
         response = http_client.get(f"/api/accounts/{account_id}/media?order_by=caption")
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_media_detail_returns_the_full_history(self, http_client, populated) -> None:
         media_id = populated["reel"].id
