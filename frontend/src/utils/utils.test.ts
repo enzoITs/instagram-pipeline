@@ -35,6 +35,8 @@ describe("validateInstagramUrl", () => {
     "https://www.instagram.com/reel/ab/",
     "not a url",
     "https://www.instagram.com:8080/reel/ABC123/",
+    // Credentials in the URL are rejected by the backend too.
+    "https://user:pass@www.instagram.com/reel/ABC123/",
     "https://%zz",
   ])("rejects %s", (raw) => {
     const result = validateInstagramUrl(raw);
@@ -116,19 +118,22 @@ describe("summarize", () => {
     const base = makeAnalysis();
     const single = makeAnalysis({
       intents: { ...base.intents, potential_buyer: 1, question: 0 },
-      sentiment: { ...base.sentiment, doubt: 0, negative: 0 },
+      sentiment: { positive: 1, negative: 0, neutral: 0, doubt: 0, spam: 0 },
       processing: { ...base.processing, comments_analyzed: 1 },
     });
     expect(summarize(single)).toBe("1 comentário analisado: 1 quer comprar e nenhum tem tom negativo.");
 
     const tiny = makeAnalysis({
       intents: { ...base.intents, potential_buyer: 0, question: 0 },
-      sentiment: { ...base.sentiment, doubt: 0, negative: 1 },
+      sentiment: { positive: 399, negative: 1, neutral: 0, doubt: 0, spam: 0 },
       processing: { ...base.processing, comments_analyzed: 400 },
     });
     expect(summarize(tiny)).toBe("400 comentários analisados: 0,3% têm tom negativo.");
 
-    const empty = makeAnalysis({ processing: { ...base.processing, comments_analyzed: 0 } });
+    const empty = makeAnalysis({
+      sentiment: { positive: 0, negative: 0, neutral: 0, doubt: 0, spam: 0 },
+      processing: { ...base.processing, comments_analyzed: 0 },
+    });
     expect(summarize(empty)).toBe("Nenhum comentário pôde ser analisado neste post.");
   });
 });

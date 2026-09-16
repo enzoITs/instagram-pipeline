@@ -35,6 +35,11 @@ export default function VideoHeader({ video }: { video: VideoInfo }) {
           {kind} {video.instagram_id}
           {facts.length > 0 && `, ${facts.join(", ")}`}
         </p>
+        {video.owned && (
+          <p className="pill pill--owned" title="As métricas vieram da Graph API desta conta conectada">
+            Métricas oficiais da conta conectada
+          </p>
+        )}
         {video.caption && <p className="video__caption">{video.caption}</p>}
         <a className="video__link" href={video.url} target="_blank" rel="noopener noreferrer">
           Abrir no Instagram

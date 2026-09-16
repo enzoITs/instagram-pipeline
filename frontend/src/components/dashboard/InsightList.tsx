@@ -23,10 +23,12 @@ export default function InsightList({ insights, source }: { insights: Insight[];
       description={SOURCE_NOTES[source ?? ""] ?? "Recomendações ordenadas por impacto."}
     >
       <ol className="insights">
-        {insights.map((insight) => {
+        {insights.map((insight, index) => {
           const Icon = ICONS[insight.type];
+          // Two insights can share a title; the index keeps the keys unique.
+          const impact = Math.min(10, Math.max(0, insight.impact_score));
           return (
-            <li key={insight.title} className={`insight insight--${insight.type}`}>
+            <li key={`${insight.title}-${index}`} className={`insight insight--${insight.type}`}>
               <p className="insight__type">
                 <Icon size={16} />
                 {INSIGHT_LABELS[insight.type]}
@@ -40,10 +42,10 @@ export default function InsightList({ insights, source }: { insights: Insight[];
                   role="meter"
                   aria-valuemin={0}
                   aria-valuemax={10}
-                  aria-valuenow={insight.impact_score}
+                  aria-valuenow={impact}
                   aria-label={`Impacto de ${insight.title}`}
                 >
-                  <span className="meter__fill" style={{ width: `${insight.impact_score * 10}%` }} />
+                  <span className="meter__fill" style={{ width: `${impact * 10}%` }} />
                 </div>
               </div>
             </li>

@@ -179,15 +179,17 @@ describe("Dashboard", () => {
   const renderDashboard = (overrides = {}, props = {}) => {
     const onDelete = vi.fn().mockResolvedValue(undefined);
     const onNewAnalysis = vi.fn();
+    const onToggleTracking = vi.fn();
     render(
       <Dashboard
         data={makeAnalysis(overrides)}
         onDelete={onDelete}
         onNewAnalysis={onNewAnalysis}
+        onToggleTracking={onToggleTracking}
         {...props}
       />,
     );
-    return { onDelete, onNewAnalysis };
+    return { onDelete, onNewAnalysis, onToggleTracking };
   };
 
   it("renders the summary, metrics, charts, insights and topics", () => {
@@ -204,7 +206,8 @@ describe("Dashboard", () => {
       "aria-valuenow",
       "5.8",
     );
-    expect(within(metrics).getByText(/não são públicos/)).toBeInTheDocument();
+    expect(within(metrics).getByText(/só são visíveis para o dono do post/)).toBeInTheDocument();
+    expect(within(metrics).getByText(/Sobre as visualizações/)).toBeInTheDocument();
 
     const sentiment = screen.getByRole("region", { name: "Sentimento" });
     expect(within(sentiment).getByText("60,0%")).toBeInTheDocument();
@@ -217,6 +220,14 @@ describe("Dashboard", () => {
     expect(screen.getByText(/coletados via Apify/)).toBeInTheDocument();
     expect(screen.getByText("Avisos do processamento (1)")).toBeInTheDocument();
     expect(screen.queryByText(/Dados de demonstração/)).not.toBeInTheDocument();
+  });
+
+  it("offers to follow the link over time", async () => {
+    const { onToggleTracking } = renderDashboard();
+    const history = screen.getByRole("region", { name: "Evolução deste link" });
+    expect(within(history).getByText(/Só há a medição desta análise/)).toBeInTheDocument();
+    await userEvent.click(within(history).getByRole("button", { name: "Acompanhar este link" }));
+    expect(onToggleTracking).toHaveBeenCalledWith(true);
   });
 
   it("offers table views for the charts", async () => {
@@ -290,6 +301,7 @@ describe("Dashboard", () => {
         ...base.metrics,
         views: null,
         engagement_rate: null,
+        engagement_basis: null,
         engagement_score: null,
         shares: 10,
         saves: 3,
@@ -316,7 +328,7 @@ describe("Dashboard", () => {
     expect(screen.getByText(/Dados de demonstração/)).toBeInTheDocument();
     expect(screen.queryByText(/Avisos do processamento/)).not.toBeInTheDocument();
     expect(screen.getByText("Compartilhamentos")).toBeInTheDocument();
-    expect(screen.getByText("Sem visualizações públicas")).toBeInTheDocument();
+    expect(screen.getByText(/Sem denominador confiável/)).toBeInTheDocument();
     expect(screen.getAllByText("Sem comentários analisados.")).toHaveLength(2);
     expect(screen.getByText(/Poucos comentários/)).toBeInTheDocument();
     expect(screen.getByText("Criador não identificado")).toBeInTheDocument();

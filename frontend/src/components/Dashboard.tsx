@@ -3,9 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import "../styles/Dashboard.css";
 import type { AnalysisData } from "../types";
 import { exportToJSON } from "../utils/export";
-import { formatRelative } from "../utils/format";
+import { formatRelative, plural } from "../utils/format";
 import { summarize } from "../utils/text";
 import CommentTriage from "./dashboard/CommentTriage";
+import HistoryChart from "./dashboard/HistoryChart";
 import InsightList from "./dashboard/InsightList";
 import IntentChart from "./dashboard/IntentChart";
 import MetricsRow from "./dashboard/MetricsRow";
@@ -17,17 +18,30 @@ import { AlertIcon, BackIcon, DownloadIcon, TrashIcon } from "./Icons";
 interface Props {
   data: AnalysisData;
   cached?: boolean;
+  trackingBusy?: boolean;
   onNewAnalysis: () => void;
   onDelete: () => Promise<void>;
+  onToggleTracking?: (tracked: boolean) => void;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
   apify: "Apify",
   instaloader: "Instaloader",
   mock: "dados de demonstração",
+  graph_api: "API oficial da Meta",
+  "graph_api+apify": "API oficial da Meta (comentários via Apify)",
+  "graph_api+instaloader": "API oficial da Meta (comentários via Instaloader)",
+  "graph_api+mock": "API oficial da Meta (comentários simulados)",
 };
 
-export default function Dashboard({ data, cached = false, onNewAnalysis, onDelete }: Props) {
+export default function Dashboard({
+  data,
+  cached = false,
+  trackingBusy = false,
+  onNewAnalysis,
+  onDelete,
+  onToggleTracking,
+}: Props) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -120,7 +134,16 @@ export default function Dashboard({ data, cached = false, onNewAnalysis, onDelet
         </div>
       </header>
 
-      <MetricsRow metrics={data.metrics} />
+      <MetricsRow metrics={data.metrics} owned={data.video.owned} />
+
+      {onToggleTracking && (
+        <HistoryChart
+          history={data.history}
+          tracked={data.tracked}
+          busy={trackingBusy}
+          onToggleTracking={onToggleTracking}
+        />
+      )}
 
       <div className="dashboard__grid">
         <SentimentChart distribution={data.sentiment} />
@@ -132,7 +155,7 @@ export default function Dashboard({ data, cached = false, onNewAnalysis, onDelet
 
       <footer className="dashboard__footer">
         <p>
-          {processing.comments_analyzed} comentários coletados via{" "}
+          {plural(processing.comments_analyzed, "comentário coletado", "comentários coletados")} via{" "}
           {SOURCE_LABELS[processing.data_source ?? ""] ?? "fonte desconhecida"}, classificados com{" "}
           {processing.nlp_backend === "transformers"
             ? "modelos de linguagem multilíngues"

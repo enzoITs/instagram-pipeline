@@ -1,7 +1,13 @@
-import type { Metrics } from "../../types";
+import type { EngagementBasis, Metrics } from "../../types";
 import { engagementTier, formatCompact, formatInteger, formatRate, formatScore } from "../../utils/format";
 
-export default function MetricsRow({ metrics }: { metrics: Metrics }) {
+const BASIS_NOTES: Record<EngagementBasis, string> = {
+  reach: "Sobre o alcance (contas que viram o post)",
+  views: "Sobre as visualizações",
+  followers: "Sobre os seguidores da conta",
+};
+
+export default function MetricsRow({ metrics, owned = false }: { metrics: Metrics; owned?: boolean }) {
   const tiles: { label: string; value: string; title?: string }[] = [
     { label: "Visualizações", value: formatCompact(metrics.views), title: formatInteger(metrics.views) },
     { label: "Curtidas", value: formatCompact(metrics.likes), title: formatInteger(metrics.likes) },
@@ -10,9 +16,11 @@ export default function MetricsRow({ metrics }: { metrics: Metrics }) {
   if (metrics.shares !== null)
     tiles.push({ label: "Compartilhamentos", value: formatCompact(metrics.shares) });
   if (metrics.saves !== null) tiles.push({ label: "Salvamentos", value: formatCompact(metrics.saves) });
+  if (metrics.reach !== null)
+    tiles.push({ label: "Alcance", value: formatCompact(metrics.reach), title: formatInteger(metrics.reach) });
 
   const score = metrics.engagement_score;
-  const hiddenCounters = metrics.shares === null && metrics.saves === null;
+  const hiddenCounters = metrics.shares === null && metrics.saves === null && metrics.reach === null;
 
   return (
     <section className="kpis" aria-label="Métricas de engajamento">
@@ -29,7 +37,9 @@ export default function MetricsRow({ metrics }: { metrics: Metrics }) {
           <dt className="kpi__label">Taxa de engajamento</dt>
           <dd className="kpi__value">{formatRate(metrics.engagement_rate)}</dd>
           <dd className="kpi__note">
-            {engagementTier(metrics.engagement_rate) ?? "Sem visualizações públicas"}
+            {metrics.engagement_basis
+              ? `${BASIS_NOTES[metrics.engagement_basis]} · ${engagementTier(metrics.engagement_rate) ?? ""}`.trim()
+              : "Sem denominador confiável (o post não expõe alcance nem visualizações)"}
           </dd>
         </div>
         <div className="kpi kpi--score">
@@ -54,10 +64,10 @@ export default function MetricsRow({ metrics }: { metrics: Metrics }) {
           )}
         </div>
       </dl>
-      {hiddenCounters && (
+      {hiddenCounters && !owned && (
         <p className="kpis__footnote">
-          Compartilhamentos e salvamentos não são públicos no Instagram, então ficam fora da taxa de
-          engajamento.
+          Alcance, compartilhamentos e salvamentos só são visíveis para o dono do post. Conecte a conta em
+          “Minhas contas” para que a análise use os números oficiais.
         </p>
       )}
     </section>

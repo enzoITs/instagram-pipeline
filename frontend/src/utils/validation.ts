@@ -20,7 +20,13 @@ export function validateInstagramUrl(raw: string): UrlValidation {
     return { ok: false, message: URL_HINT };
   }
   const host = parsed.hostname.toLowerCase();
-  if (!["http:", "https:"].includes(parsed.protocol) || !ALLOWED_HOSTS.has(host) || parsed.port) {
+  const hasCredentials = Boolean(parsed.username || parsed.password);
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    !ALLOWED_HOSTS.has(host) ||
+    parsed.port ||
+    hasCredentials
+  ) {
     return { ok: false, message: "O link precisa ser do instagram.com. " + URL_HINT };
   }
 

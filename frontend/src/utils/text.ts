@@ -40,7 +40,10 @@ export function highlightKeyPhrases(text: string, phrases: string[]): TextPart[]
 
 /** One plain-language sentence that tells the reader what the comment section is about. */
 export function summarize(data: AnalysisData): string {
-  const total = data.processing.comments_analyzed;
+  // The charts divide by the sentiment distribution, so the sentence does too:
+  // two denominators for the same page would show two different percentages.
+  const classified = Object.values(data.sentiment).reduce((sum, value) => sum + value, 0);
+  const total = classified || data.processing.comments_analyzed;
   if (total === 0) return "Nenhum comentário pôde ser analisado neste post.";
 
   const buyers = data.intents.potential_buyer;

@@ -12,6 +12,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         "/api": { target: apiTarget, changeOrigin: true },
+        "/auth": { target: apiTarget, changeOrigin: true },
         "/health": { target: apiTarget, changeOrigin: true },
       },
     },

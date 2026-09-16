@@ -1,0 +1,318 @@
+/* Connected accounts: the history side of the product. Same sheet-on-paper
+   vocabulary as the analysis screens, one wide column of panels. */
+
+.accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.accounts__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.accounts__bar-spacer {
+  flex: 1 1 auto;
+}
+
+.accounts__select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.accounts__select select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--sheet-sunken);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.accounts__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.accounts__empty h2 {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  margin: 0;
+}
+
+.notice--account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--notice-demo);
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.notice--success {
+  background: color-mix(in srgb, var(--status-good) 12%, var(--sheet));
+}
+
+.notice--error {
+  background: color-mix(in srgb, var(--danger) 12%, var(--sheet));
+}
+
+/* ------------------------------------------------------------------ cards */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+  gap: var(--space-3);
+}
+
+.summary-card {
+  padding: var(--space-4);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.summary-card__label {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.summary-card__value {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  color: var(--ink);
+  margin-top: var(--space-1);
+}
+
+.summary-card__note {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  margin-top: var(--space-1);
+}
+
+/* ----------------------------------------------------------------- tables */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.media-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.media-table th,
+.media-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.media-table thead th {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.media-table td.num,
+.media-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.media-table__post {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 26rem;
+  white-space: normal;
+}
+
+.media-table__thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--radius-mark);
+  flex: none;
+}
+
+.media-table__caption {
+  font: inherit;
+  color: var(--ink);
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.media-table__links {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  margin-top: var(--space-1);
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--sheet-sunken);
+  border: 1px solid var(--rule);
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
+.pill--success {
+  border-color: var(--status-good);
+  color: var(--status-good-ink);
+}
+
+.pill--failed {
+  border-color: var(--danger);
+  color: var(--status-critical-ink);
+}
+
+.pill--running {
+  border-color: var(--status-warning);
+}
+
+.pill--owned {
+  border-color: var(--focus);
+  color: var(--focus);
+}
+
+/* ---------------------------------------------------------------- filters */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+  margin-bottom: var(--space-3);
+}
+
+.filters input[type="search"],
+.filters select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--sheet-sunken);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* ----------------------------------------------------------------- dialog */
+.media-dialog {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+  background: var(--sheet);
+  color: var(--ink);
+  padding: 0;
+  width: min(60rem, 92vw);
+}
+
+.media-dialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.media-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.media-dialog__body {
+  padding: var(--space-4);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------------------ login */
+.login {
+  max-width: 34rem;
+  margin: var(--space-8) auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sheet);
+}
+
+.login h1 {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  margin: 0;
+}
+
+.login__lead {
+  color: var(--ink-2);
+  margin: 0;
+}
+
+/* -------------------------------------------------------------------- tabs */
+.tabs {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.tabs__link {
+  font: inherit;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.tabs__link[aria-current="page"] {
+  background: var(--sheet);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+
+@media (max-width: 40rem) {
+  .accounts__bar {
+    align-items: stretch;
+  }
+
+  .media-table__post {
+    max-width: 14rem;
+  }
+}

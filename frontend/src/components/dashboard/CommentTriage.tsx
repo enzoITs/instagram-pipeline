@@ -42,14 +42,21 @@ export default function CommentTriage({ comments }: { comments: CommentSample[] 
   const [sentiment, setSentiment] = useState<SentimentFilter>("all");
   const [page, setPage] = useState(0);
 
+  // Counted over the comments the sentiment filter already allows, and only
+  // where the intent is known — otherwise a chip would promise rows that the
+  // filter below then drops.
   const counts = useMemo(() => {
-    const byIntent: Record<string, number> = { all: comments.length };
-    for (const comment of comments) {
-      const key = comment.sentiment_analysis?.intent_category ?? "other";
+    const visible = comments.filter(
+      (comment) => sentiment === "all" || comment.sentiment_analysis?.sentiment === sentiment,
+    );
+    const byIntent: Record<string, number> = { all: visible.length };
+    for (const comment of visible) {
+      const key = comment.sentiment_analysis?.intent_category;
+      if (!key) continue;
       byIntent[key] = (byIntent[key] ?? 0) + 1;
     }
     return byIntent;
-  }, [comments]);
+  }, [comments, sentiment]);
 
   const filtered = useMemo(
     () =>
