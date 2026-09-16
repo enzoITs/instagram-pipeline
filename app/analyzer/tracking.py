@@ -14,10 +14,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.analyzer.models import EngagementMetrics, Video, VideoMetricSnapshot, VideoStatus
+from app.analyzer.models import AnalysisCache, EngagementMetrics, Video, VideoMetricSnapshot, VideoStatus
+from app.analyzer.services.cache_service import SyncCacheService
 from app.analyzer.services.scraper_service import InstagramScraper, ScrapedPost, ScraperError
 from app.config import Settings, get_settings
 from app.database import session_scope
@@ -89,6 +90,8 @@ def record_snapshot(db: Session, video: Video, post: ScrapedPost, *, collected_a
         current.engagement_rate, current.engagement_basis = rate, basis
         current.collected_at = collected_at
     video.last_tracked_at = collected_at
+    # The cached analysis still holds the previous numbers and history.
+    db.execute(delete(AnalysisCache).where(AnalysisCache.video_instagram_id == video.instagram_id))
     return snapshot
 
 
@@ -113,7 +116,8 @@ def refresh_tracked_videos(settings: Settings | None = None) -> int:
                 if post is None:
                     continue
                 record_snapshot(db, stored, post, collected_at=collected_at)
-                refreshed += 1
+            SyncCacheService().delete(video.instagram_id)
+            refreshed += 1
         except Exception:  # noqa: BLE001 - one bad link must not stop the others
             logger.exception("tracking_refresh_failed", extra={"video_id": str(video.id)})
     if videos:

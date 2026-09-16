@@ -245,6 +245,7 @@ async def set_tracking(
     payload: TrackingRequest,
     video_id: uuid.UUID = Path(...),
     session: AsyncSession = Depends(get_session),
+    cache: CacheService = Depends(get_cache),
 ) -> TrackingResponse:
     """Um link acompanhado recebe uma nova coleta de métricas periodicamente
     (apenas números, sem comentários nem NLP), formando um histórico como o das
@@ -253,7 +254,11 @@ async def set_tracking(
     if video is None:
         raise APIError(status.HTTP_404_NOT_FOUND, "not_found", "Análise não encontrada")
     video.tracked = payload.tracked
+    # The cached payload carries the tracking flag; drop it so the next read
+    # is rebuilt from the database instead of showing the old state.
+    await delete_cache_backup(session, video.instagram_id)
     await session.commit()
+    await cache.delete(video.instagram_id)
     logger.info("analysis_tracking_changed", extra={"video_id": str(video_id), "tracked": payload.tracked})
     return TrackingResponse(video_id=video.id, tracked=video.tracked)
 

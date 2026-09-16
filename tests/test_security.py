@@ -105,3 +105,25 @@ class TestProtected:
 
     def test_the_csv_export_requires_a_session(self, secured, account) -> None:
         assert secured.get(f"/api/accounts/{account.id}/export.csv").status_code == 401
+
+
+class TestLoginHardening:
+    def test_guessing_the_password_is_rate_limited(self, secured) -> None:
+        statuses = [
+            secured.post("/auth/session", json={"password": f"guess-{n}"}).status_code
+            for n in range(6)
+        ]
+        assert statuses == [401] * 5 + [429]
+        # Even the right password waits for the window to pass.
+        right = secured.post("/auth/session", json={"password": "correct horse battery staple"})
+        assert right.status_code == 429
+        assert right.headers["Retry-After"]
+
+    def test_changing_the_password_ends_existing_sessions(self, secured) -> None:
+        secured.post("/auth/session", json={"password": "correct horse battery staple"})
+        assert secured.get("/api/accounts").status_code == 200
+
+        settings = get_settings()
+        settings.admin_password = "a brand new password"
+        assert secured.get("/api/accounts").status_code == 401
+        assert secured.get("/auth/session").json() == {"auth_required": True, "authenticated": False}

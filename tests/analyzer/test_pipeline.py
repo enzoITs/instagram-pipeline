@@ -1,4 +1,5 @@
 import json
+import tempfile
 import uuid
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -311,6 +312,8 @@ def test_celery_configuration_and_worker_init(monkeypatch):
     assert conf.task_default_queue == "analysis"
     # Collection jobs go to their own queue, away from the NLP workers.
     assert conf.task_routes["app.tasks.collect_account"]["queue"] == "collection"
+    # The image runs as an unprivileged user; beat must not write to /app.
+    assert conf.beat_schedule_filename.startswith(tempfile.gettempdir())
 
     celery_module._setup_logging()
     monkeypatch.setattr(celery_module.settings, "nlp_torch_threads", None)

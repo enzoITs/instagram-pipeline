@@ -124,6 +124,31 @@ class TestHappyPath:
         assert account.last_collected_at is not None
 
 
+    @respx.mock
+    def test_a_post_repeated_across_pages_is_stored_once(self, db, account, api_client) -> None:
+        _mock_happy_path()
+        first = MEDIA_PAGE["data"][0]
+        respx.get(f"{GRAPH}/17841400000000001/media").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={
+                        "data": [first],
+                        "paging": {"next": f"{GRAPH}/17841400000000001/media?after=page2"},
+                    },
+                ),
+                httpx.Response(200, json=MEDIA_PAGE),
+            ]
+        )
+
+        result = collect_account(db, account, client=api_client)
+
+        assert result.status is RunStatus.SUCCESS
+        assert result.media_seen == 2
+        assert len(db.scalars(select(Media)).all()) == 2
+        assert len(db.scalars(select(MetricSnapshot)).all()) == 2
+
+
 class TestDegradedPaths:
     @respx.mock
     def test_unsupported_metrics_are_dropped_and_the_call_retried(

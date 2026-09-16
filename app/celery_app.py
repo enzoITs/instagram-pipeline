@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from typing import Any
 
 from celery import Celery, signals
@@ -74,6 +75,14 @@ celery_app.conf.update(
     # Default = one process per CPU core. Each analysis process loads the NLP
     # models, so memory-constrained hosts should cap it via CELERY_CONCURRENCY.
     worker_concurrency=int(_concurrency) if _concurrency else None,
+    # Beat keeps its last-run times in a local file. The default (the working
+    # directory) is read-only for the unprivileged user in the image, which
+    # silently killed the embedded beat; the temp directory is always writable.
+    # Losing the file only means beat recomputes the schedule on start-up.
+    beat_schedule_filename=os.environ.get(
+        "CELERY_BEAT_SCHEDULE_FILE",
+        os.path.join(tempfile.gettempdir(), "instagram-pipeline-celerybeat-schedule"),
+    ),
 )
 
 

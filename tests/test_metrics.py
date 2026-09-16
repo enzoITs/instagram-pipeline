@@ -66,6 +66,13 @@ class TestEngagementRate:
         rate, basis = compute_engagement_rate({"likes": 100, "comments": 20}, 5000)
         assert (rate, basis) == (2.4, "followers")
 
+    def test_views_come_before_followers(self) -> None:
+        metrics = {"likes": 90, "comments": 10, "views": 2000}
+        assert compute_engagement_rate(metrics, 5000) == (5.0, "views")
+
+    def test_zero_views_fall_through_to_followers(self) -> None:
+        assert compute_engagement_rate({"likes": 50, "views": 0}, 1000) == (5.0, "followers")
+
     def test_zero_reach_is_a_measurement_not_a_missing_denominator(self) -> None:
         # Reported zero reach with interactions on top of it is contradictory;
         # dividing by followers would invent an audience for the post.
