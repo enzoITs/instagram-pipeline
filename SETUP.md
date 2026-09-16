@@ -241,6 +241,17 @@ link** você cola qualquer URL de Reel ou post.
 Sem chaves ainda? `python scripts/seed_demo.py` popula uma conta fictícia
 (inativa, para o agendador nunca chamar a Meta) e duas análises de exemplo.
 
+**Vindo da versão com SQLite?** O histórico em `data/instagram_pipeline.db` não
+vai sozinho para o PostgreSQL. Com o PostgreSQL novo no ar (e ainda vazio):
+```bash
+python scripts/import_sqlite.py data/instagram_pipeline.db
+```
+O arquivo original não é alterado, e o script se recusa a importar num banco que
+já tenha dados. Para os tokens continuarem legíveis, o `.env` novo precisa da
+mesma chave da instalação antiga — se você nunca definiu `SECRET_KEY`, use o
+conteúdo de `data/.secret_key`. O script avisa quais contas ficaram com token
+ilegível (essas precisam ser reconectadas).
+
 ---
 
 ## Passo 8 — Revisão da Meta (*App Review*): quando é necessária

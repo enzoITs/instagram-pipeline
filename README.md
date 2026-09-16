@@ -326,4 +326,5 @@ frontend/src/
 migrations/             0001–0004 (schema completo)
 tests/                  suíte do backend (tests/analyzer/ = análise por link)
 scripts/seed_demo.py    dados de demonstração
+scripts/import_sqlite.py  importa o banco SQLite da versão antiga
 ```
