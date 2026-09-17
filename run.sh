@@ -22,8 +22,16 @@ if [ ! -f .env ]; then
 fi
 
 if [ ! -d .venv ]; then
-  echo "==> Creating the virtual environment"
-  python3 -m venv .venv
+  # The pinned wheels (torch in particular) target CPython 3.12/3.13; a newer
+  # system python3 may have none, so prefer an explicit supported interpreter.
+  PYTHON=${PYTHON:-}
+  if [ -z "$PYTHON" ]; then
+    for candidate in python3.12 python3.13 python3; do
+      if command -v "$candidate" >/dev/null 2>&1; then PYTHON=$candidate; break; fi
+    done
+  fi
+  echo "==> Creating the virtual environment with $PYTHON"
+  "$PYTHON" -m venv .venv
 fi
 
 echo "==> Installing dependencies"
