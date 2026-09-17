@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -174,6 +175,17 @@ class CollectionRun(Base):
     """Audit trail of every scheduled or manual collection."""
 
     __tablename__ = "collection_runs"
+    __table_args__ = (
+        # Two simultaneous requests could both start a collection for one
+        # account; this index makes the database decide (migration 0004).
+        Index(
+            "uq_collection_runs_one_running_per_account",
+            "account_id",
+            unique=True,
+            sqlite_where=text("status = 'RUNNING'"),
+            postgresql_where=text("status = 'RUNNING'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int | None] = mapped_column(

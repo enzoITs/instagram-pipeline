@@ -41,6 +41,32 @@ echo "==> Installing dependencies"
 echo "==> Starting PostgreSQL and Redis"
 $COMPOSE up -d postgres redis
 
+echo "==> Waiting for PostgreSQL"
+# A PostgreSQL installed on the machine can hold the port first; the container
+# then fails to bind and the migrations would hit the wrong server.
+if ! ./.venv/bin/python - <<'EOF'
+import sys, time
+import sqlalchemy
+from app.config import settings
+
+engine = sqlalchemy.create_engine(settings.sync_database_url)
+error = None
+for _ in range(30):
+    try:
+        with engine.connect():
+            sys.exit(0)
+    except Exception as exc:  # noqa: BLE001
+        error = exc
+        time.sleep(1)
+print(f"Cannot connect to {engine.url!r}: {error}", file=sys.stderr)
+sys.exit(1)
+EOF
+then
+  echo "==> If another PostgreSQL uses that port, set POSTGRES_PORT (e.g. 5433) in .env"
+  echo "    and the same port in DATABASE_URL, then run ./run.sh again."
+  exit 1
+fi
+
 echo "==> Applying migrations"
 ./.venv/bin/alembic upgrade head
 

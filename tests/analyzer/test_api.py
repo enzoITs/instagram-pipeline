@@ -47,7 +47,8 @@ async def test_analyze_accepts_and_processes_in_background(client, monkeypatch):
 
     started = time.perf_counter()
     response = await client.post("/api/v1/analyze", json={"url": "instagram.com/reel/C8xYz12AbCd/?igsh=1"})
-    assert time.perf_counter() - started < 0.5
+    # Generous bound: the first request may also open a cold PostgreSQL connection.
+    assert time.perf_counter() - started < 2.0
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "processing"
