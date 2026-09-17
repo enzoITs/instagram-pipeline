@@ -1,0 +1,16 @@
+# Worker-only dependencies: scraping, NLP and AI insights.
+-r requirements.txt
+
+openai==3.13.0
+instaloader==4.15.3
+scikit-learn==1.9.1
+nltk==3.10.3
+numpy==2.4.6
+
+# CPU wheels keep the image ~2 GB smaller. For GPU hosts install the CUDA build of
+# torch instead; NLP_DEVICE=auto picks the GPU up automatically.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0
+transformers==5.17.0
+sentencepiece==0.2.2
+protobuf==7.36.1

@@ -1,0 +1,21 @@
+[
+  {
+    "id": "3401234567890123456",
+    "type": "Video",
+    "shortCode": "C8xYz12AbCd",
+    "caption": "Novo produto chegou! #lancamento",
+    "url": "https://www.instagram.com/reel/C8xYz12AbCd/",
+    "commentsCount": 1230,
+    "likesCount": 18500,
+    "videoViewCount": 200000,
+    "videoPlayCount": 250000,
+    "videoDuration": 30.5,
+    "displayUrl": "https://scontent.cdninstagram.com/v/thumb.jpg",
+    "timestamp": "2024-09-15T10:30:00.000Z",
+    "ownerUsername": "brand",
+    "productType": "clips",
+    "latestComments": [
+      {"id": "17900000000000001", "text": "Comentário da amostra", "ownerUsername": "sample_user", "timestamp": "2024-09-15T11:00:00.000Z", "likesCount": 3}
+    ]
+  }
+]

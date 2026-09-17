@@ -1,12 +1,16 @@
-# Runtime dependencies — Instagram Pipeline
-# Versions pinned to releases with CPython 3.12–3.14 wheels.
-fastapi==0.118.0
-uvicorn[standard]==0.37.0
-sqlalchemy==2.0.43
+# Runtime dependencies shared by the API and the workers.
+# Versions pinned to releases with CPython 3.12+ wheels.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+sqlalchemy[asyncio]==2.0.52
+# psycopg 3 serves both the blocking and the asyncio engine, so one driver
+# covers the API, the workers and Alembic.
+psycopg[binary]==3.3.5
+alembic==1.19.2
 pydantic==2.13.5
 pydantic-settings==2.15.0
 httpx==0.28.1
-apscheduler==3.11.0
 cryptography==46.0.1
 itsdangerous==2.2.0
-jinja2==3.1.6
+redis==6.4.0
+celery[redis]==5.6.3

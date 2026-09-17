@@ -62,9 +62,28 @@ class TestEngagementRate:
         metrics = {"likes": 100, "comments": 20, "saved": 30, "shares": 10, "reach": 1000}
         assert compute_engagement_rate(metrics) == (16.0, "reach")
 
-    def test_falls_back_to_followers_when_reach_is_zero(self) -> None:
-        rate, basis = compute_engagement_rate({"likes": 100, "comments": 20, "reach": 0}, 5000)
+    def test_falls_back_to_followers_when_reach_is_missing(self) -> None:
+        rate, basis = compute_engagement_rate({"likes": 100, "comments": 20}, 5000)
         assert (rate, basis) == (2.4, "followers")
+
+    def test_views_come_before_followers(self) -> None:
+        metrics = {"likes": 90, "comments": 10, "views": 2000}
+        assert compute_engagement_rate(metrics, 5000) == (5.0, "views")
+
+    def test_zero_views_fall_through_to_followers(self) -> None:
+        assert compute_engagement_rate({"likes": 50, "views": 0}, 1000) == (5.0, "followers")
+
+    def test_zero_reach_is_a_measurement_not_a_missing_denominator(self) -> None:
+        # Reported zero reach with interactions on top of it is contradictory;
+        # dividing by followers would invent an audience for the post.
+        assert compute_engagement_rate({"likes": 100, "comments": 20, "reach": 0}, 5000) == (
+            None,
+            None,
+        )
+
+    def test_zero_reach_with_no_interactions_is_a_real_zero(self) -> None:
+        metrics = {"likes": 0, "comments": 0, "saved": 0, "shares": 0, "reach": 0}
+        assert compute_engagement_rate(metrics, 5000) == (0.0, "reach")
 
     def test_returns_none_when_no_denominator_is_available(self) -> None:
         assert compute_engagement_rate({"likes": 10}) == (None, None)

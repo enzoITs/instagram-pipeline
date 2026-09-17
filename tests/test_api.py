@@ -13,6 +13,22 @@ from app.models import CollectionRun, Media, MetricSnapshot, RunStatus
 GRAPH = "https://graph.instagram.com/v23.0"
 
 
+def _state_from(location: str) -> str:
+    """Pull the `state` query parameter out of a Meta authorisation URL."""
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(location).query)["state"][0]
+
+
+def _begin_login(http_client) -> str:
+    """Run the real first leg of the handshake and return its `state`.
+
+    The client keeps the nonce cookie, which the callback now requires.
+    """
+    response = http_client.get("/auth/login", follow_redirects=False)
+    return _state_from(response.headers["location"])
+
+
 @pytest.fixture()
 def populated(db, account):
     """One account with two posts and two collection runs of history."""
@@ -83,7 +99,9 @@ class TestSystem:
         page = http_client.get("/")
         assert page.status_code == 200
         assert "Instagram Pipeline" in page.text
-        assert http_client.get("/static/app.js").status_code == 200
+        # The single-page app and its hashed bundle come from frontend/dist.
+        assert http_client.get("/assets/app.js").status_code == 200
+        assert http_client.get("/favicon.svg").status_code == 200
         assert http_client.get("/docs").status_code == 200
 
 
@@ -107,7 +125,10 @@ class TestAccounts:
         # Newest snapshots only: 200 + 60 likes, not all four rows.
         assert body["total_likes"] == 260
         assert body["total_reach"] == 2600
-        assert body["average_engagement_rate"] == pytest.approx(12.67, abs=0.01)
+        # Weighted, not an average of percentages: (270 + 71) interactions over
+        # the 2600 accounts they reached.
+        assert body["average_engagement_rate"] == pytest.approx(13.12, abs=0.01)
+        assert body["engagement_basis"] == "reach"
         assert body["account"]["username"] == "test.account"
 
     def test_summary_of_an_account_without_data(self, http_client, account) -> None:
@@ -124,6 +145,9 @@ class TestAccounts:
         assert points[0]["likes"] == 150  # 100 + 50 at the older collection
         assert points[1]["likes"] == 260
         assert points[0]["media_count"] == 2
+        # (135 + 58) interactions over the 1500 reached at that collection.
+        assert points[0]["engagement_rate"] == pytest.approx(12.87, abs=0.01)
+        assert points[0]["engagement_basis"] == "reach"
         # Timestamps carry an explicit UTC marker so the browser does not
         # reinterpret them as local time.
         assert points[0]["collected_at"].endswith("Z")
@@ -131,7 +155,7 @@ class TestAccounts:
     def test_timeseries_respects_the_range(self, http_client, populated) -> None:
         account_id = populated["account"].id
         assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=1").json()
-        assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=800").status_code == 422
+        assert http_client.get(f"/api/accounts/{account_id}/timeseries?days=800").status_code == 400
 
     def test_breakdown_groups_by_product_type(self, http_client, populated) -> None:
         account_id = populated["account"].id
@@ -141,6 +165,9 @@ class TestAccounts:
         assert set(by_type) == {"REELS", "FEED"}
         assert by_type["REELS"]["media_count"] == 1
         assert by_type["REELS"]["total_reach"] == 2000
+        assert by_type["REELS"]["average_engagement_rate"] == pytest.approx(13.5, abs=0.01)
+        assert by_type["FEED"]["average_engagement_rate"] == pytest.approx(11.83, abs=0.01)
+        assert by_type["FEED"]["engagement_basis"] == "reach"
 
     def test_unknown_account_returns_404(self, http_client) -> None:
         assert http_client.get("/api/accounts/9999/summary").status_code == 404
@@ -184,7 +211,7 @@ class TestMedia:
     def test_invalid_ordering_is_rejected(self, http_client, populated) -> None:
         account_id = populated["account"].id
         response = http_client.get(f"/api/accounts/{account_id}/media?order_by=caption")
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_media_detail_returns_the_full_history(self, http_client, populated) -> None:
         media_id = populated["reel"].id
@@ -270,13 +297,57 @@ class TestJobs:
             )
         )
 
-        body = http_client.post(f"/api/accounts/{account.id}/collect").json()
+        response = http_client.post(f"/api/accounts/{account.id}/collect?wait=true")
 
+        assert response.status_code == 200
+        body = response.json()
         assert body["status"] == "success"
         assert body["snapshots_created"] == 1
 
         media = http_client.get(f"/api/accounts/{account.id}/media").json()
         assert media["items"][0]["latest"]["reach"] == 100
+
+    @respx.mock
+    def test_collection_runs_in_the_background_by_default(
+        self, http_client, account
+    ) -> None:
+        """The caller gets a run id straight away instead of holding the socket."""
+        respx.route(host="testserver").pass_through()
+        respx.get(f"{GRAPH}/{account.ig_user_id}").mock(
+            return_value=httpx.Response(
+                200, json={"id": account.ig_user_id, "followers_count": 10}
+            )
+        )
+        respx.get(f"{GRAPH}/{account.ig_user_id}/media").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        response = http_client.post(f"/api/accounts/{account.id}/collect")
+
+        assert response.status_code == 202
+        run_id = response.json()["run_id"]
+        assert response.json()["status"] == "running"
+
+        # The background task has completed by the time the client returns.
+        run = http_client.get(f"/api/runs/{run_id}").json()
+        assert run["status"] == "success"
+        assert run["finished_at"] is not None
+
+    def test_a_second_collection_is_refused_while_one_is_running(
+        self, http_client, account, db
+    ) -> None:
+        db.add(
+            CollectionRun(
+                account_id=account.id, status=RunStatus.RUNNING, trigger="manual"
+            )
+        )
+        db.commit()
+        response = http_client.post(f"/api/accounts/{account.id}/collect")
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"]
+
+    def test_unknown_run_returns_404(self, http_client) -> None:
+        assert http_client.get("/api/runs/999999").status_code == 404
 
 
 class TestAuth:
@@ -301,6 +372,26 @@ class TestAuth:
         assert response.status_code == 303
         assert "Invalid%20OAuth%20state" in response.headers["location"]
 
+    def test_login_sets_a_browser_binding_cookie(self, http_client) -> None:
+        response = http_client.get("/auth/login", follow_redirects=False)
+        assert "ig_oauth_nonce" in response.cookies
+        state = _state_from(response.headers["location"])
+        assert "nonce" not in state  # the nonce travels signed, not in the clear
+
+    def test_callback_rejects_a_state_minted_for_another_browser(
+        self, http_client
+    ) -> None:
+        """An attacker can start their own login; that must not be enough."""
+        attacker = http_client.get("/auth/login", follow_redirects=False)
+        stolen_state = _state_from(attacker.headers["location"])
+        http_client.cookies.delete("ig_oauth_nonce")  # victim has no cookie
+
+        response = http_client.get(
+            f"/auth/callback?code=abc&state={stolen_state}", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert "error=" in response.headers["location"]
+
     def test_callback_surfaces_a_user_denial(self, http_client) -> None:
         response = http_client.get(
             "/auth/callback?error=access_denied&error_description=User+denied",
@@ -319,9 +410,7 @@ class TestAuth:
 class TestAuthCallbackSuccess:
     @respx.mock
     def test_a_successful_callback_stores_the_account(self, http_client, db) -> None:
-        from app.config import get_settings
         from app.crypto import decrypt_token
-        from app.instagram.oauth import make_state
         from app.models import Account
 
         respx.route(host="testserver").pass_through()
@@ -345,7 +434,7 @@ class TestAuthCallbackSuccess:
             )
         )
 
-        state = make_state(get_settings())
+        state = _begin_login(http_client)
         response = http_client.get(
             f"/auth/callback?code=abc%23_&state={state}", follow_redirects=False
         )
@@ -367,9 +456,7 @@ class TestAuthCallbackSuccess:
 
     @respx.mock
     def test_reconnecting_updates_the_existing_row(self, http_client, db, account) -> None:
-        from app.config import get_settings
         from app.crypto import decrypt_token
-        from app.instagram.oauth import make_state
         from app.models import Account
 
         account.is_active = False
@@ -390,7 +477,7 @@ class TestAuthCallbackSuccess:
         )
 
         http_client.get(
-            f"/auth/callback?code=abc&state={make_state(get_settings())}",
+            f"/auth/callback?code=abc&state={_begin_login(http_client)}",
             follow_redirects=False,
         )
 

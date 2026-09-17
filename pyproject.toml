@@ -1,20 +1,70 @@
 [project]
 name = "instagram-pipeline"
-version = "1.0.0"
-description = "Coleta automatizada e histórico de métricas de engajamento do Instagram via Meta Graph API"
-requires-python = ">=3.11"
+version = "2.0.0"
+description = "Histórico de métricas de contas Instagram e análise de engajamento por link"
+requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-q --strict-markers"
+markers = [
+    "slow: tests that download/run real Hugging Face models (opt-in with RUN_MODEL_TESTS=1)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette.testclient",
+    "ignore::DeprecationWarning:celery.*",
+    "ignore::DeprecationWarning:kombu.*",
 ]
 
 [tool.coverage.run]
 source = ["app"]
-omit = ["app/static/*"]
+branch = true
+# SQLAlchemy's asyncio layer switches greenlets; without this, lines after an
+# awaited query are wrongly reported as not covered.
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["migrations/versions", "frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    # Long lines are only flagged by the formatter's own rule, which is not on.
+    "E501",
+    # FastAPI's dependency injection is expressed as function-call defaults.
+    "B008",
+    # The codebase spells UTC as `timezone.utc` throughout; the `datetime.UTC`
+    # alias would be a mechanical churn across every module for no gain.
+    "UP017",
+    # RunStatus is persisted through SQLAlchemy's Enum type; switching it to
+    # enum.StrEnum would change how existing rows round-trip.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files import inside functions on purpose, to control settings ordering.
+"tests/*" = ["E402"]
+"tests/conftest.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = ["migrations/", "tests/", "frontend/"]

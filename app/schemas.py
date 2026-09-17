@@ -40,6 +40,7 @@ class AccountSummary(BaseModel):
     total_reach: int
     total_views: int
     average_engagement_rate: float | None = None
+    engagement_basis: str | None = None
     first_collected_at: datetime | None = None
     last_collected_at: datetime | None = None
 
@@ -93,6 +94,7 @@ class MediaPage(BaseModel):
 # ----------------------------------------------------------------- analytics
 class TimeseriesPoint(BaseModel):
     collected_at: datetime
+    engagement_basis: str | None = None
     likes: int = 0
     comments: int = 0
     saved: int = 0
@@ -107,6 +109,7 @@ class MediaTypeBreakdown(BaseModel):
     media_product_type: str
     media_count: int
     average_engagement_rate: float | None = None
+    engagement_basis: str | None = None
     total_reach: int = 0
     total_views: int = 0
 
@@ -147,16 +150,31 @@ class TokenRefreshOut(BaseModel):
 
 # --------------------------------------------------------------------- system
 class HealthOut(BaseModel):
+    """Service state. Everything past `database` is omitted for anonymous
+    callers, so the probe stays usable without leaking the configuration."""
+
     status: str
-    environment: str
-    database: str
-    meta_configured: bool
-    login_flow: str
-    graph_api_version: str
-    scheduler_running: bool
-    connected_accounts: int
+    auth_required: bool = False
+    database: str = "ok"
+    redis: str = "ok"
+    version: str | None = None
+    environment: str | None = None
+    meta_configured: bool | None = None
+    login_flow: str | None = None
+    graph_api_version: str | None = None
+    scheduler_running: bool | None = None
+    connected_accounts: int | None = None
     next_collection_at: datetime | None = None
+    analyses: int | None = None
+    cache_hit_ratio: float | None = None
 
 
-class MessageOut(BaseModel):
-    detail: str
+class SessionOut(BaseModel):
+    """Whether the dashboard needs a login, and whether this caller has one."""
+
+    auth_required: bool
+    authenticated: bool
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)

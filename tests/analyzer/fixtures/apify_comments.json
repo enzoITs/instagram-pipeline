@@ -1,0 +1,8 @@
+[
+  {"id": "17850000000000001", "text": "Adorei! Quando vende?", "ownerUsername": "user123", "timestamp": "2024-09-15T11:00:00.000Z", "likesCount": 42, "postUrl": "https://www.instagram.com/reel/C8xYz12AbCd/"},
+  {"id": "17850000000000002", "text": "  Produto   incrível  ", "owner": {"username": "nested_owner"}, "timestamp": 1726398000, "likesCount": "7"},
+  {"id": "17850000000000001", "text": "Duplicate id must be dropped", "ownerUsername": "dup", "likesCount": 1},
+  {"id": "17850000000000003", "text": "", "ownerUsername": "empty_text"},
+  {"text": "Sem id, recebe hash", "ownerUsername": "no_id", "timestamp": "2024-09-15T12:00:00Z", "likesCount": -1},
+  "not-a-dict"
+]

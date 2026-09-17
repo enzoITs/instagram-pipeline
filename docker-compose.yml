@@ -1,14 +1,131 @@
+name: instagram-pipeline
+
+# Shared configuration for the API and both workers. Values come from `.env`
+# (see .env.example); only the ones the containers must override are listed.
+x-app-env: &app-env
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pipeline}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-instagram_pipeline}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  TASK_BACKEND: celery
+  AUTO_MIGRATE: "false"
+  INSTAGRAM_APP_ID: ${INSTAGRAM_APP_ID:-}
+  INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
+  META_LOGIN_FLOW: ${META_LOGIN_FLOW:-instagram_login}
+  GRAPH_API_VERSION: ${GRAPH_API_VERSION:-v23.0}
+  ENABLE_GRAPH_COMMENTS: ${ENABLE_GRAPH_COMMENTS:-false}
+  COLLECTION_INTERVAL_MINUTES: ${COLLECTION_INTERVAL_MINUTES:-360}
+  MAX_MEDIA_PER_COLLECTION: ${MAX_MEDIA_PER_COLLECTION:-50}
+  API_CALLS_PER_HOUR: ${API_CALLS_PER_HOUR:-180}
+  TRACKING_INTERVAL_MINUTES: ${TRACKING_INTERVAL_MINUTES:-720}
+  SCRAPER_MODE: ${SCRAPER_MODE:-auto}
+  APIFY_TOKEN: ${APIFY_TOKEN:-}
+  MAX_COMMENTS: ${MAX_COMMENTS:-500}
+  INSTAGRAM_USERNAME: ${INSTAGRAM_USERNAME:-}
+  INSTAGRAM_SESSIONFILE: ${INSTAGRAM_SESSIONFILE:-}
+  NLP_BACKEND: ${NLP_BACKEND:-transformers}
+  NLP_DEVICE: ${NLP_DEVICE:-auto}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4-turbo}
+
 services:
-  app:
-    build: .
+  postgres:
+    image: docker.io/library/postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-instagram_pipeline}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      # Host port only; containers still talk to postgres:5432. Change it when a
+      # PostgreSQL installed on the machine already listens on 5432.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pipeline} -d ${POSTGRES_DB:-instagram_pipeline}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence keeps queued jobs across restarts; noeviction protects the
+    # broker keys (cache entries always carry a TTL, so memory is reclaimed anyway).
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      target: api
+    image: instagram-pipeline-api:latest
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
-    env_file:
-      - .env
-    environment:
-      # Inside the container the app must listen on all interfaces.
-      HOST: 0.0.0.0
-      DATABASE_URL: sqlite:////app/data/instagram_pipeline.db
-    volumes:
-      - ./data:/app/data
+
+  worker:
+    build:
+      context: .
+      target: worker
+    image: instagram-pipeline-worker:latest
     restart: unless-stopped
+    environment:
+      <<: *app-env
+      CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+      WORKER_PRELOAD_NLP: "true"
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      # Hugging Face models are downloaded once and reused across restarts.
+      - hf_cache:/home/app/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+
+  collector:
+    # Graph API collection, token refresh and the periodic schedule (beat).
+    # One process on purpose: the Meta call budget is enforced per process.
+    build:
+      context: .
+      target: api
+    image: instagram-pipeline-api:latest
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+    command: >
+      sh -c "exec celery -A app.celery_app worker -Q collection -B
+      --concurrency 1 --loglevel=${LOG_LEVEL:-INFO}"
+
+volumes:
+  pg_data:
+  redis_data:
+  hf_cache:

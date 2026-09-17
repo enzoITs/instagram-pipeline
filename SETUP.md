@@ -6,6 +6,10 @@ estas credenciais ele roda, mas não consegue falar com o Instagram.
 
 Tempo estimado: 30 a 45 minutos (a maior parte é esperar telas da Meta).
 
+O projeto tem duas metades: **contas conectadas** (métricas oficiais e histórico,
+exige os passos 1 a 5) e **análise por link** (qualquer post público, exige as
+chaves opcionais do passo 6).
+
 ---
 
 ## Resumo do que é necessário
@@ -17,10 +21,16 @@ Tempo estimado: 30 a 45 minutos (a maior parte é esperar telas da Meta).
 | 3 | **App ID** e **App Secret** | Sim | Painel do app na Meta |
 | 4 | URL pública HTTPS (redirect URI) | Sim | ngrok / Cloudflare Tunnel / seu domínio |
 | 5 | `SECRET_KEY` e `TOKEN_ENCRYPTION_KEY` | Sim (produção) | Gerados por comando local |
-| 6 | Revisão do app (*App Review*) | Só para contas de terceiros | Painel do app na Meta |
+| 6 | `ADMIN_PASSWORD` (senha do dashboard) | Sim, se o endereço não for só seu | Escolhida por você |
+| 7 | Revisão do app (*App Review*) | Só para contas de terceiros | Painel do app na Meta |
+| 8 | PostgreSQL 15 e Redis 7 | Sim | Sobem pelo `docker compose` / `podman-compose` |
+| 9 | `APIFY_TOKEN` | Só para analisar links de **terceiros** | https://console.apify.com → Settings → Integrations |
+| 10 | `OPENAI_API_KEY` | Não (sem ela, insights por regras) | https://platform.openai.com/api-keys |
 
-Nenhum destes itens tem custo. A Graph API do Instagram é gratuita dentro dos
-limites de requisição.
+A Graph API do Instagram é gratuita dentro dos limites de requisição, e
+PostgreSQL e Redis sobem em contêineres locais. Apify e OpenAI são pagos por
+uso e **opcionais**: sem eles, o sistema analisa normalmente os posts das contas
+conectadas (pela API oficial) e gera insights por regras.
 
 ---
 
@@ -156,27 +166,95 @@ No `.env`:
 ```env
 SECRET_KEY=<primeiro valor>
 TOKEN_ENCRYPTION_KEY=<segundo valor>
+ADMIN_PASSWORD=<a senha que você vai usar para entrar no dashboard>
 ```
 
 > Se `TOKEN_ENCRYPTION_KEY` ficar vazio, uma chave é derivada de `SECRET_KEY` —
 > aceitável para desenvolvimento. **Trocar `SECRET_KEY` depois invalida todos os
 > tokens já salvos**, e as contas precisarão ser reconectadas.
 
+> Em desenvolvimento você pode deixar `SECRET_KEY` comentada: o app gera uma
+> chave na primeira execução e a guarda em `data/.secret_key`, então reiniciar
+> não derruba os tokens salvos. Deixar a linha presente e **vazia** é diferente
+> disso e não é aceito. Com `ENVIRONMENT=production` o app se recusa a subir
+> sem uma chave de verdade.
+
+> `ADMIN_PASSWORD` vazia significa **nenhuma autenticação**: qualquer um que
+> alcance a URL vê os dados, dispara coletas (gastando sua cota da Meta) e pode
+> desconectar contas. Como o túnel do Passo 4 é um endereço público, preencha.
+
 ---
 
-## Passo 6 — Rodar
+## Passo 6 — Chaves opcionais da análise por link
 
-```bash
-cp .env.example .env     # e preencha os valores dos passos acima
-./run.sh                 # cria o venv, instala tudo e sobe o servidor
+A análise de um post **de uma conta conectada** usa a API oficial da Meta e não
+precisa de mais nada. Para analisar links de **outras** pessoas, o Instagram
+bloqueia acesso anônimo, então é preciso uma das opções abaixo:
+
+```env
+# Apify: coleta gerenciada (paga por uso), o caminho recomendado
+APIFY_TOKEN=apify_api_...
+
+# ou uma sessão do Instaloader, se você já tiver o arquivo de sessão
+INSTAGRAM_USERNAME=seu.usuario
+INSTAGRAM_SESSIONFILE=/caminho/para/session-seu.usuario
+
+# ou, para ver o painel com dados fictícios determinísticos:
+SCRAPER_MODE=mock
 ```
 
-Abra a URL pública do túnel (não `localhost`) e clique em
-**Conectar Instagram**. Depois de autorizar, clique em **Coletar agora**.
+Os insights com IA são opcionais: com `OPENAI_API_KEY` o texto vem do modelo,
+sem ela vem de regras que usam as mesmas métricas.
+
+Para ler os comentários de posts próprios pela API oficial (em vez de coletá-los),
+ative `ENABLE_GRAPH_COMMENTS=true` e peça a permissão
+`instagram_business_manage_comments` (ou `instagram_manage_comments`, no fluxo B)
+no painel da Meta. Quem já conectou a conta precisa reconectá-la para conceder a
+permissão nova.
 
 ---
 
-## Passo 7 — Revisão da Meta (*App Review*): quando é necessária
+## Passo 7 — Banco, fila e como subir
+
+O sistema usa PostgreSQL (histórico), Redis (cache, limite de requisições e
+fila) e dois workers Celery: um para as análises (carrega os modelos de NLP) e
+outro para a coleta da Meta e os jobs periódicos.
+
+**Tudo em contêineres** (jeito mais simples):
+```bash
+cp .env.example .env     # preencha os valores dos passos acima
+docker compose up -d --build     # ou: podman-compose up -d --build
+docker compose ps                # aguarde "healthy"; o worker baixa ~1,5 GB de modelos na 1ª vez
+```
+
+**Na sua máquina** (o script sobe só o banco e o Redis em contêiner):
+```bash
+./run.sh     # cria o venv, migra, compila o painel e roda API + os dois workers
+```
+
+Abra a URL pública do túnel (não `localhost`). O painel pede a senha do
+`ADMIN_PASSWORD`, abre na aba **Minhas contas**, e ali você clica em **Conectar
+conta do Instagram**. Terminada a autorização, use **Coletar agora** — a coleta
+roda em segundo plano e a tela acompanha o progresso. Na aba **Análise por
+link** você cola qualquer URL de Reel ou post.
+
+Sem chaves ainda? `python scripts/seed_demo.py` popula uma conta fictícia
+(inativa, para o agendador nunca chamar a Meta) e duas análises de exemplo.
+
+**Vindo da versão com SQLite?** O histórico em `data/instagram_pipeline.db` não
+vai sozinho para o PostgreSQL. Com o PostgreSQL novo no ar (e ainda vazio):
+```bash
+python scripts/import_sqlite.py data/instagram_pipeline.db
+```
+O arquivo original não é alterado, e o script se recusa a importar num banco que
+já tenha dados. Para os tokens continuarem legíveis, o `.env` novo precisa da
+mesma chave da instalação antiga — se você nunca definiu `SECRET_KEY`, use o
+conteúdo de `data/.secret_key`. O script avisa quais contas ficaram com token
+ilegível (essas precisam ser reconectadas).
+
+---
+
+## Passo 8 — Revisão da Meta (*App Review*): quando é necessária
 
 | Cenário | Precisa de App Review? |
 |---------|------------------------|
@@ -210,8 +288,11 @@ O prazo costuma ser de alguns dias úteis.
 - [ ] `<PUBLIC_BASE_URL>/auth/callback` registrado como URI de redirecionamento
 - [ ] Sua conta aceita como testadora do app
 - [ ] `SECRET_KEY` e `TOKEN_ENCRYPTION_KEY` preenchidos
-- [ ] `./run.sh` sobe sem erros e `/api/health` responde `"meta_configured": true`
+- [ ] `ADMIN_PASSWORD` definida (o endereço do túnel é público)
+- [ ] `./run.sh` (ou `docker compose up`) sobe sem erros
+- [ ] `/api/health` responde `"meta_configured": true`, `"database": "ok"` e `"redis": "ok"`
 - [ ] Botão "Coletar agora" traz posts reais
+- [ ] Analisar o link de um post seu mostra o selo "Métricas oficiais da conta conectada"
 
 ---
 

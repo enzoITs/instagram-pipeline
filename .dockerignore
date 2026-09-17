@@ -1,0 +1,25 @@
+# Keep the build context small and free of secrets: the images copy only
+# app/, migrations/, scripts/ and the frontend sources.
+.git
+.github
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+.venv*/
+venv/
+_analyzer_backup/
+**/__pycache__
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+tests/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/

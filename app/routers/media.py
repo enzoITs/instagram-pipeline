@@ -6,15 +6,16 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Account, Media
+from app.models import Account, Media, MetricSnapshot
 from app.routers.accounts import get_account
 from app.schemas import MediaDetail, MediaPage, MediaWithLatest, SnapshotOut
+from app.security import require_session
 from app.services import analytics
 
-router = APIRouter(prefix="/api", tags=["media"])
+router = APIRouter(prefix="/api", tags=["media"], dependencies=[Depends(require_session)])
 
 
 @router.get(
@@ -61,13 +62,19 @@ def read_media(
     db: Session = Depends(get_db),
     history_limit: int = Query(default=200, ge=1, le=2000),
 ) -> MediaDetail:
-    media = db.scalar(
-        select(Media).options(selectinload(Media.snapshots)).where(Media.id == media_id)
-    )
+    media = db.scalar(select(Media).where(Media.id == media_id))
     if media is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found.")
 
+    # Years of history can be thousands of rows; take the newest `history_limit`
+    # in the database rather than loading them all to throw most away.
+    newest_first = db.scalars(
+        select(MetricSnapshot)
+        .where(MetricSnapshot.media_id == media.id)
+        .order_by(MetricSnapshot.collected_at.desc(), MetricSnapshot.id.desc())
+        .limit(history_limit)
+    ).all()
+
     detail = MediaDetail.model_validate(media)
-    snapshots = sorted(media.snapshots, key=lambda s: s.collected_at)
-    detail.snapshots = [SnapshotOut.model_validate(s) for s in snapshots[-history_limit:]]
+    detail.snapshots = [SnapshotOut.model_validate(row) for row in reversed(newest_first)]
     return detail

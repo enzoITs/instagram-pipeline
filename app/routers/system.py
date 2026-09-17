@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterator
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import __version__
 from app import scheduler as scheduler_module
+from app.analyzer.models import Video
 from app.config import get_settings
-from app.database import get_db
+from app.database import check_database, get_db
 from app.models import Account, Media, MetricSnapshot
 from app.routers.accounts import get_account
 from app.schemas import HealthOut
+from app.security import require_session, session_is_valid
 
 router = APIRouter(tags=["system"])
 
@@ -41,35 +46,65 @@ EXPORT_COLUMNS = [
 
 
 @router.get("/api/health", response_model=HealthOut, summary="Service health and config")
-def health(db: Session = Depends(get_db)) -> HealthOut:
-    settings = get_settings()
-    try:
-        db.execute(select(1))
-        database = "ok"
-    except Exception as exc:  # pragma: no cover - only on a broken DB
-        database = f"error: {exc}"
+async def health(request: Request, response: Response, db: Session = Depends(get_db)) -> HealthOut:
+    """Liveness plus, for a signed-in caller, the configuration detail.
 
-    connected = db.scalar(
-        select(func.count(Account.id)).where(Account.is_active.is_(True))
-    ) or 0
+    The endpoint stays reachable without a session so an uptime probe works,
+    but an anonymous caller only learns whether the service is up — not how it
+    is configured, how many accounts it holds or how busy it is. A dependency
+    that is down answers 503, which is what container health checks read.
+    """
+    settings = get_settings()
+    database_ok = await check_database(timeout=2.0)
+    database = "ok" if database_ok else "error"
+
+    cache = getattr(request.app.state, "cache", None)
+    redis_ok = bool(cache is not None and await cache.ping(timeout=2.0))
+
+    status_value = "ok" if database_ok and redis_ok else "degraded"
+    if status_value == "degraded":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    if not session_is_valid(request, settings):
+        return HealthOut(
+            status=status_value,
+            auth_required=True,
+            database=database,
+            redis="ok" if redis_ok else "error",
+        )
+
+    connected = db.scalar(select(func.count(Account.id)).where(Account.is_active.is_(True))) or 0
+    analyses = db.scalar(select(func.count(Video.id))) or 0
+    stats = await cache.stats() if redis_ok and cache is not None else {}
 
     return HealthOut(
-        status="ok" if database == "ok" else "degraded",
+        status=status_value,
+        auth_required=settings.auth_enabled,
         environment=settings.environment,
+        version=__version__,
         database=database,
+        redis="ok" if redis_ok else "error",
         meta_configured=settings.is_configured,
         login_flow=settings.meta_login_flow,
         graph_api_version=settings.graph_api_version,
-        scheduler_running=scheduler_module.is_running(),
+        scheduler_running=settings.enable_scheduler,
         connected_accounts=connected,
-        next_collection_at=scheduler_module.next_collection_time(),
+        analyses=analyses,
+        cache_hit_ratio=stats.get("hit_ratio"),
+        next_collection_at=await run_in_threadpool(scheduler_module.next_collection_time),
     )
+
+
+@router.get("/health", include_in_schema=False)
+async def health_alias(request: Request, response: Response, db: Session = Depends(get_db)) -> HealthOut:
+    """Alias kept for container health checks and the former analyzer clients."""
+    return await health(request, response, db)
 
 
 @router.get(
     "/api/accounts/{account_id}/export.csv",
     summary="Download the full metric history as CSV",
     response_class=StreamingResponse,
+    dependencies=[Depends(require_session)],
 )
 def export_csv(
     account: Account = Depends(get_account),
@@ -81,30 +116,48 @@ def export_csv(
         .join(Media, Media.id == MetricSnapshot.media_id)
         .where(Media.account_id == account.id)
         .order_by(MetricSnapshot.collected_at.desc(), Media.id)
+        .execution_options(yield_per=500)
     )
-    rows = db.execute(stmt).all()
+    filename = f"instagram-metrics-{account.username or account.ig_user_id}.csv"
+    return StreamingResponse(
+        _csv_rows(db, stmt, latest_only=latest_only),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
-    if latest_only:
-        seen: set[int] = set()
-        filtered = []
-        for snapshot, media in rows:
+
+def _csv_rows(db: Session, stmt, *, latest_only: bool) -> Iterator[str]:  # noqa: ANN001
+    """Yield the export one chunk at a time.
+
+    Years of history can be far more rows than are comfortable to hold in
+    memory, so the query streams and each line is handed to the client as it is
+    produced instead of being assembled into a single string.
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+
+    def flush() -> str:
+        chunk = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        return chunk
+
+    writer.writerow(EXPORT_COLUMNS)
+    yield flush()
+
+    seen: set[int] = set()
+    for snapshot, media in db.execute(stmt):
+        if latest_only:
             if media.id in seen:
                 continue
             seen.add(media.id)
-            filtered.append((snapshot, media))
-        rows = filtered
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(EXPORT_COLUMNS)
-    for snapshot, media in rows:
         writer.writerow(
             [
                 _iso(snapshot.collected_at),
-                media.ig_media_id,
-                media.permalink or "",
-                media.media_type or "",
-                media.media_product_type or "",
+                _text(media.ig_media_id),
+                _text(media.permalink),
+                _text(media.media_type),
+                _text(media.media_product_type),
                 _iso(media.timestamp),
                 _num(snapshot.likes),
                 _num(snapshot.comments),
@@ -114,18 +167,11 @@ def export_csv(
                 _num(snapshot.views),
                 _num(snapshot.total_interactions),
                 _num(snapshot.engagement_rate),
-                snapshot.engagement_basis or "",
-                (media.caption or "").replace("\n", " ").strip()[:500],
+                _text(snapshot.engagement_basis),
+                _text((media.caption or "").replace("\n", " ").strip()[:500]),
             ]
         )
-
-    buffer.seek(0)
-    filename = f"instagram-metrics-{account.username or account.ig_user_id}.csv"
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+        yield flush()
 
 
 def _iso(value: datetime | None) -> str:
@@ -134,3 +180,18 @@ def _iso(value: datetime | None) -> str:
 
 def _num(value: int | float | None) -> str:
     return "" if value is None else str(value)
+
+
+# Characters a spreadsheet treats as the start of a formula. A caption is
+# attacker-controlled text, so prefixing it keeps the export from executing
+# anything when opened in Excel, LibreOffice or Sheets.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _text(value: str | None) -> str:
+    """Return a cell value that cannot be interpreted as a formula."""
+    if not value:
+        return ""
+    if value.startswith(_FORMULA_PREFIXES):
+        return f"\t{value}"
+    return value

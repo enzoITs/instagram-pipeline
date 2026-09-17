@@ -2,7 +2,7 @@
 .env
 *.pem
 
-# Local database
+# Local database and the generated development secret
 data/
 *.db
 *.db-wal
@@ -24,3 +24,8 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+.venv*/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+.mypy_cache/

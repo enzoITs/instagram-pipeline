@@ -15,7 +15,9 @@ Two flows are supported, selected through ``META_LOGIN_FLOW``:
 
 from __future__ import annotations
 
+import hmac
 import logging
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,6 +38,10 @@ FACEBOOK_GRAPH_HOST = "https://graph.facebook.com"
 
 STATE_SALT = "instagram-pipeline-oauth-state"
 STATE_MAX_AGE_SECONDS = 600
+
+# Name of the cookie holding the nonce that ties a `state` value to the browser
+# that started the login.
+STATE_COOKIE_NAME = "ig_oauth_nonce"
 
 
 class OAuthError(RuntimeError):
@@ -64,21 +70,69 @@ def _serializer(settings: Settings) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.secret_key, salt=STATE_SALT)
 
 
-def make_state(settings: Settings | None = None, payload: dict[str, Any] | None = None) -> str:
-    """Create a signed, time-limited CSRF `state` value."""
+def new_nonce() -> str:
+    """Random value stored in a cookie and embedded in the signed `state`."""
+    return secrets.token_urlsafe(24)
+
+
+def make_state(
+    settings: Settings | None = None,
+    payload: dict[str, Any] | None = None,
+    *,
+    nonce: str | None = None,
+) -> str:
+    """Create a signed, time-limited CSRF `state` value.
+
+    The signature alone only proves *this app* minted the value — an attacker
+    can mint one too, simply by starting a login. Embedding *nonce*, which the
+    caller also stores in a cookie, is what ties the callback to the browser
+    that actually began the handshake.
+    """
     settings = settings or get_settings()
-    return _serializer(settings).dumps(payload or {"v": 1})
+    data: dict[str, Any] = dict(payload or {"v": 1})
+    if nonce:
+        data["nonce"] = nonce
+    return _serializer(settings).dumps(data)
 
 
-def verify_state(state: str, settings: Settings | None = None) -> dict[str, Any]:
+def verify_state(
+    state: str,
+    settings: Settings | None = None,
+    *,
+    expected_nonce: str | None = None,
+) -> dict[str, Any]:
     """Validate a `state` value returned by Meta. Raises :class:`OAuthError`."""
     settings = settings or get_settings()
     try:
-        return _serializer(settings).loads(state, max_age=STATE_MAX_AGE_SECONDS)
+        data = _serializer(settings).loads(state, max_age=STATE_MAX_AGE_SECONDS)
     except SignatureExpired as exc:
         raise OAuthError("The login link expired. Please start the connection again.") from exc
     except BadSignature as exc:
         raise OAuthError("Invalid OAuth state — the request may have been tampered with.") from exc
+
+    if not isinstance(data, dict):
+        raise OAuthError("Invalid OAuth state — unexpected payload.")
+
+    # A state with no nonce is always rejected: accepting one would leave the
+    # exact hole the nonce exists to close, since anyone can mint a signed
+    # state simply by starting a login of their own.
+    embedded = str(data.get("nonce") or "")
+    if not embedded:
+        raise OAuthError(
+            "Invalid OAuth state — it carries no browser binding. "
+            "Start the connection again from the dashboard."
+        )
+    if not expected_nonce:
+        raise OAuthError(
+            "This login did not start in this browser (the state cookie is "
+            "missing or expired). Start the connection again from the dashboard."
+        )
+    if not hmac.compare_digest(embedded, expected_nonce):
+        raise OAuthError(
+            "Invalid OAuth state — it does not match the browser that started "
+            "the login. Start the connection again."
+        )
+    return data
 
 
 # ------------------------------------------------------------- authorize URL
@@ -243,7 +297,9 @@ def _exchange_code_facebook(
             ig_user_id=str(ig_account["id"]),
             access_token=page_token,
             # Page tokens derived from a long-lived user token do not expire.
-            expires_at=expires_at,
+            # Storing the user token's expiry here made the refresh job "renew"
+            # the same token every 12 hours, forever, without anything changing.
+            expires_at=None if page.get("access_token") else expires_at,
             username=profile.get("username") or ig_account.get("username"),
             name=profile.get("name"),
             account_type=profile.get("account_type"),

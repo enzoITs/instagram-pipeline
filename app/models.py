@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -65,10 +66,10 @@ class Account(Base):
         UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
-    media: Mapped[list["Media"]] = relationship(
+    media: Mapped[list[Media]] = relationship(
         back_populates="account", cascade="all, delete-orphan", passive_deletes=True
     )
-    runs: Mapped[list["CollectionRun"]] = relationship(
+    runs: Mapped[list[CollectionRun]] = relationship(
         back_populates="account", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -80,13 +81,19 @@ class Media(Base):
     """A single post / Reel / story published by a connected account."""
 
     __tablename__ = "media"
-    __table_args__ = (Index("ix_media_account_timestamp", "account_id", "timestamp"),)
+    __table_args__ = (
+        # Scoped to the account rather than global: uniqueness per account is
+        # what the collector actually looks up, and a global constraint would
+        # let one account's post absorb another account's snapshots.
+        UniqueConstraint("account_id", "ig_media_id", name="uq_media_account_ig_id"),
+        Index("ix_media_account_timestamp", "account_id", "timestamp"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True
     )
-    ig_media_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    ig_media_id: Mapped[str] = mapped_column(String(64), index=True)
 
     media_type: Mapped[str | None] = mapped_column(String(32))
     media_product_type: Mapped[str | None] = mapped_column(String(32))
@@ -106,7 +113,7 @@ class Media(Base):
     )
 
     account: Mapped[Account] = relationship(back_populates="media")
-    snapshots: Mapped[list["MetricSnapshot"]] = relationship(
+    snapshots: Mapped[list[MetricSnapshot]] = relationship(
         back_populates="media",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -149,8 +156,11 @@ class MetricSnapshot(Base):
     follows: Mapped[int | None] = mapped_column(Integer)
 
     engagement_rate: Mapped[float | None] = mapped_column(Float)
-    # Denominator actually used for the engagement rate ("reach" or "followers").
+    # Denominator actually used for the rate: "reach", "views" or "followers".
     engagement_basis: Mapped[str | None] = mapped_column(String(16))
+    # The denominator's value, so averages can be weighted (sum of interactions
+    # over sum of audience) instead of averaging percentages of different sizes.
+    engagement_denominator: Mapped[int | None] = mapped_column(Integer)
 
     # Untouched API payload, so nothing Meta returns is ever lost.
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -165,6 +175,17 @@ class CollectionRun(Base):
     """Audit trail of every scheduled or manual collection."""
 
     __tablename__ = "collection_runs"
+    __table_args__ = (
+        # Two simultaneous requests could both start a collection for one
+        # account; this index makes the database decide (migration 0004).
+        Index(
+            "uq_collection_runs_one_running_per_account",
+            "account_id",
+            unique=True,
+            sqlite_where=text("status = 'RUNNING'"),
+            postgresql_where=text("status = 'RUNNING'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int | None] = mapped_column(
@@ -187,3 +208,29 @@ class CollectionRun(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
         return f"<CollectionRun {self.id} {self.status}>"
+
+
+class JobLock(Base):
+    """A short-lived claim on a scheduled job, held in the database.
+
+    The scheduler runs inside the web process, so starting the app with more
+    than one worker would otherwise run every job once per worker — duplicating
+    collections and multiplying the Graph API calls against the same quota.
+    The lock lives in the database precisely because that is the one thing all
+    the workers share.
+    """
+
+    __tablename__ = "job_locks"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(128))
+    acquired_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # A holder that dies without releasing must not block the job forever.
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"<JobLock {self.job_id} by {self.owner}>"
+
+# Link-analysis models share the declarative base; importing them here
+# registers every table on Base.metadata for Alembic and init_db.
+from app.analyzer import models as _analyzer_models  # noqa: E402, F401

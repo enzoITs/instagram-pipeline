@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Account
 from app.schemas import AccountOut, AccountSummary, MediaTypeBreakdown, TimeseriesPoint
+from app.security import require_session
 from app.services import analytics
 
-router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+router = APIRouter(prefix="/api/accounts", tags=["accounts"], dependencies=[Depends(require_session)])
 
 
 def get_account(account_id: int, db: Session = Depends(get_db)) -> Account:

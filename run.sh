@@ -1,25 +1,95 @@
 #!/usr/bin/env bash
-# Development helper: create the virtualenv if needed, then start the server.
+# Development helper: bring up PostgreSQL and Redis, migrate, then run the API,
+# both workers and (optionally) the Vite dev server.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
+COMPOSE=${COMPOSE:-}
+if [ -z "$COMPOSE" ]; then
+  if command -v docker >/dev/null 2>&1; then COMPOSE="docker compose"
+  elif command -v podman-compose >/dev/null 2>&1; then COMPOSE="podman-compose"
+  else
+    echo "Neither docker nor podman-compose found. Start PostgreSQL and Redis yourself,"
+    echo "then run: .venv/bin/uvicorn app.main:app --reload"
+    exit 1
+  fi
+fi
+
+if [ ! -f .env ]; then
+  echo "==> No .env found. Copy the template first:  cp .env.example .env"
+  exit 1
+fi
+
 if [ ! -d .venv ]; then
-  echo "==> Creating the virtual environment"
-  python3 -m venv .venv
+  # The pinned wheels (torch in particular) target CPython 3.12/3.13; a newer
+  # system python3 may have none, so prefer an explicit supported interpreter.
+  PYTHON=${PYTHON:-}
+  if [ -z "$PYTHON" ]; then
+    for candidate in python3.12 python3.13 python3; do
+      if command -v "$candidate" >/dev/null 2>&1; then PYTHON=$candidate; break; fi
+    done
+  fi
+  echo "==> Creating the virtual environment with $PYTHON"
+  "$PYTHON" -m venv .venv
 fi
 
 echo "==> Installing dependencies"
 ./.venv/bin/pip install --quiet --upgrade pip
-./.venv/bin/pip install --quiet -r requirements.txt
+./.venv/bin/pip install --quiet -r requirements-dev.txt
 
-if [ ! -f .env ]; then
-  echo "==> No .env found; copying .env.example. Fill in your Meta credentials."
-  cp .env.example .env
+echo "==> Starting PostgreSQL and Redis"
+$COMPOSE up -d postgres redis
+
+echo "==> Waiting for PostgreSQL"
+# A PostgreSQL installed on the machine can hold the port first; the container
+# then fails to bind and the migrations would hit the wrong server.
+if ! ./.venv/bin/python - <<'EOF'
+import sys, time
+import sqlalchemy
+from app.config import settings
+
+engine = sqlalchemy.create_engine(settings.sync_database_url)
+error = None
+for _ in range(30):
+    try:
+        with engine.connect():
+            sys.exit(0)
+    except Exception as exc:  # noqa: BLE001
+        error = exc
+        time.sleep(1)
+print(f"Cannot connect to {engine.url!r}: {error}", file=sys.stderr)
+sys.exit(1)
+EOF
+then
+  echo "==> If another PostgreSQL uses that port, set POSTGRES_PORT (e.g. 5433) in .env"
+  echo "    and the same port in DATABASE_URL, then run ./run.sh again."
+  exit 1
+fi
+
+echo "==> Applying migrations"
+./.venv/bin/alembic upgrade head
+
+if [ ! -f frontend/dist/index.html ]; then
+  echo "==> Building the dashboard (first run only)"
+  npm --prefix frontend ci --no-audit --no-fund
+  npm --prefix frontend run build
 fi
 
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
+
+pids=()
+cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+echo "==> Starting the analysis worker"
+./.venv/bin/celery -A app.celery_app worker -Q analysis --concurrency 1 --loglevel=INFO &
+pids+=($!)
+
+echo "==> Starting the collection worker and the schedule"
+./.venv/bin/celery -A app.celery_app worker -Q collection -B --concurrency 1 --loglevel=INFO &
+pids+=($!)
 
 echo "==> Dashboard: http://${HOST}:${PORT}"
 exec ./.venv/bin/uvicorn app.main:app --host "$HOST" --port "$PORT" "$@"
